@@ -9,8 +9,8 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from PySide6.QtCore import QProcess, QUrl
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QUrl
+from PySide6.QtWidgets import QApplication
 from app import MainWindow, DownloadJob
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 APP = QApplication.instance() or QApplication([])
@@ -302,6 +302,8 @@ class Regressions(unittest.TestCase):
             self.root, 'oauth-flow', cache,
             [sys.executable, '-c', source, str(cache)], self.w,
         )
+        accepted = []
+        dialog.accepted.connect(lambda: accepted.append(True))
         limit = time.monotonic() + 5
         while not dialog._login_url_loaded and time.monotonic() < limit:
             APP.processEvents(); time.sleep(.01)
@@ -314,9 +316,12 @@ class Regressions(unittest.TestCase):
             while dialog.process.state() != QProcess.NotRunning and time.monotonic() < limit:
                 APP.processEvents(); time.sleep(.01)
             APP.processEvents()
-        self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertEqual(accepted, [True])
         self.assertTrue(inspect_pixiv_cache(cache)['authenticated'])
-        dialog.close()
+        dialog.deleteLater()
+        del dialog
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        APP.processEvents()
 
     def test_managed_x_missing_cookie_is_blocked_before_gallery_dl(self):
         with self.assertRaisesRegex(ValueError, '未ログイン'):

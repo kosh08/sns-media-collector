@@ -128,6 +128,7 @@ class XLoginDialog(QDialog):
     """Isolated X login whose cookies are exported only to one account file."""
     def __init__(self, data_dir: Path, profile_id: str, cookie_path: Path, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.cookie_path = Path(cookie_path)
         self._cookies: dict[tuple[str, str, str], BrowserCookie] = {}
         self.setWindowTitle("Xログイン / Cookie更新")
@@ -248,6 +249,7 @@ class PixivLoginDialog(QDialog):
     def __init__(self, data_dir: Path, profile_id: str, cache_path: Path,
                  engine: list[str], parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.cache_path = Path(cache_path)
         self.engine = list(engine)
         self._oauth_output = ""
@@ -486,9 +488,9 @@ class AccountDialog(QDialog):
                 self.data_dir, self.profile_id,
                 managed_x_cookie_path(self.data_dir, self.profile_id), self,
             )
-            dialog.exec()
+            accepted = dialog.exec() == QDialog.Accepted
             self._refresh_managed_status()
-            if dialog.result() == QDialog.Accepted:
+            if accepted:
                 self.test_x_auth()
         except Exception as exc:
             QMessageBox.warning(self, "アプリ内Xログイン", str(exc))
@@ -521,9 +523,9 @@ class AccountDialog(QDialog):
                 self.engine,
                 self,
             )
-            dialog.exec()
+            accepted = dialog.exec() == QDialog.Accepted
             self._refresh_managed_status()
-            if dialog.result() == QDialog.Accepted:
+            if accepted:
                 self.test_pixiv_auth()
         except Exception as exc:
             QMessageBox.warning(self, "アプリ内pixivログイン", str(exc))
