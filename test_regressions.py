@@ -302,6 +302,7 @@ class Regressions(unittest.TestCase):
         dialog = PixivLoginDialog(
             self.root, 'oauth-flow', cache,
             [sys.executable, '-c', source, str(cache)], self.w,
+            persistent_web_profile=False,
         )
         accepted = []
         dialog.accepted.connect(lambda: accepted.append(True))

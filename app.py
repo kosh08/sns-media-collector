@@ -247,7 +247,7 @@ class XLoginDialog(QDialog):
 class PixivLoginDialog(QDialog):
     """Run gallery-dl's PKCE flow in an isolated embedded browser."""
     def __init__(self, data_dir: Path, profile_id: str, cache_path: Path,
-                 engine: list[str], parent=None):
+                 engine: list[str], parent=None, *, persistent_web_profile: bool = True):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.cache_path = Path(cache_path)
@@ -272,14 +272,17 @@ class PixivLoginDialog(QDialog):
             from PySide6.QtWebEngineWidgets import QWebEngineView
         except Exception as exc:
             raise RuntimeError(f"アプリ内pixivログイン機能を読み込めませんでした: {exc}") from exc
-        web_root = managed_pixiv_web_profile_dir(data_dir, profile_id)
-        web_root.mkdir(parents=True, exist_ok=True)
-        self.web_profile = QWebEngineProfile(f"smc-pixiv-{profile_id}", self)
-        self.web_profile.setPersistentStoragePath(str(web_root / "storage"))
-        self.web_profile.setCachePath(str(web_root / "cache"))
-        self.web_profile.setPersistentCookiesPolicy(
-            QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
-        )
+        if persistent_web_profile:
+            web_root = managed_pixiv_web_profile_dir(data_dir, profile_id)
+            web_root.mkdir(parents=True, exist_ok=True)
+            self.web_profile = QWebEngineProfile(f"smc-pixiv-{profile_id}", self)
+            self.web_profile.setPersistentStoragePath(str(web_root / "storage"))
+            self.web_profile.setCachePath(str(web_root / "cache"))
+            self.web_profile.setPersistentCookiesPolicy(
+                QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
+            )
+        else:
+            self.web_profile = QWebEngineProfile(self)
         self.page = QWebEnginePage(self.web_profile, self)
         self.view = QWebEngineView(self); self.view.setPage(self.page)
         self.view.urlChanged.connect(self._url_changed)
