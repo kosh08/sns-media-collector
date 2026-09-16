@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QUrl
 from PySide6.QtWidgets import QApplication
 from app import MainWindow, DownloadJob
@@ -318,7 +319,8 @@ class Regressions(unittest.TestCase):
             APP.processEvents()
         self.assertEqual(accepted, [True])
         self.assertTrue(inspect_pixiv_cache(cache)['authenticated'])
-        dialog.deleteLater()
+        if shiboken6.isValid(dialog):
+            dialog.deleteLater()
         del dialog
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         APP.processEvents()
