@@ -1,1 +1,1 @@
-0.3.0-installer-test
+0.3.1

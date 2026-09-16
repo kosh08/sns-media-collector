@@ -82,6 +82,28 @@ class Regressions(unittest.TestCase):
         j.preexisting_media = snapshot_media_files(root); (root / 'unrelated.jpg').write_bytes(b'other app')
         outside = self.root / 'outside.jpg'; outside.write_bytes(b'outside'); j.reported_file_paths = [str(outside)]
         j._reconcile_actual_files(); self.assertEqual(j.files_saved_count, 0); self.assertEqual(j.missing_reported_paths, [str(outside)])
+
+    def test_likes_recovers_mojibaked_report_paths_from_tweet_ids(self):
+        root = self.root / '珈琲砂糖 (@KoffeeS_08) - Likes'; root.mkdir()
+        j = DownloadJob('verify', [sys.executable])
+        j.verification_root = root
+        j.preexisting_media = snapshot_media_files(root, recursive=False)
+        j.verification_recursive = False
+        j.smc_context = dict(
+            self.ctx,
+            job_kind='likes_download',
+            probe_new_records=[NEW, SECOND],
+        )
+        first = root / f'[26-09-16] {NEW.post_id}_p0.jpg'
+        second = root / f'[26-09-16] {NEW.post_id}_p1.jpg'
+        first.write_bytes(b'first'); second.write_bytes(b'second')
+        j.reported_file_paths = [
+            rf'D:\\hitomi\\���荻�� (@KoffeeS_08) - Likes\\{first.name}',
+            rf'D:\\hitomi\\���荻�� (@KoffeeS_08) - Likes\\{second.name}',
+        ]
+        j._reconcile_actual_files()
+        self.assertEqual(set(j.verified_file_paths), {str(first), str(second)})
+        self.assertEqual(j.missing_reported_paths, [])
     def test_atomic_json_failure_preserves_settings(self):
         p = self.root / 'accounts.json'; atomic_write_json(p, {'name': 'original'})
         with patch('core.os.replace', side_effect=OSError('simulated')):

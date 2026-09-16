@@ -21,7 +21,7 @@ from core import (
     build_x_likes_anchor_command, build_x_likes_probe_command, find_likes_anchor_boundary,
     import_hitomi_x_archive, import_x_likes_seen_archive, incremental_baseline, iso_utc,
     likes_post_urls, normalize_target, parse_iso, parse_smc_file_line, parse_smc_like_seen_line, parse_smc_x_meta_line,
-    redact_command, select_likes_anchor_records, snapshot_media_files, normalized_local_path,
+    redact_command, select_likes_anchor_records, snapshot_media_files, new_media_since_snapshot, normalized_local_path,
     MEDIA_EXTENSIONS, safe_to_advance_download_state, utc_now, atomic_write_json, partition_likes_records,
 )
 
@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.0-installer-test"
+APP_VERSION = "0.3.1"
 
 
 DARK_QSS = r"""
@@ -243,6 +243,7 @@ class DownloadJob(QWidget):
         self.process = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUTF8", "1")
         self.process.setProcessEnvironment(env)
         self.process.setProcessChannelMode(QProcess.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._read)
@@ -445,6 +446,34 @@ class DownloadJob(QWidget):
             # Only attribute files explicitly reported by this engine to this job.
             for path in self.reported_file_paths:
                 self._verify_file_path(path)
+            recovered_count = 0
+
+            # A frozen gallery-dl process can write console paths using the
+            # Windows ANSI code page even when PYTHONIOENCODING is set.  That
+            # corrupts Japanese directory names before they reach Qt.  For a
+            # Likes job, recover by scanning only files created during this
+            # job and accepting only filenames containing a Tweet ID that the
+            # immediately preceding probe selected.
+            ctx = getattr(self, "smc_context", {})
+            if (ctx.get("job_kind") == "likes_download" and
+                    len(self.verified_file_paths) < len(set(self.reported_file_paths))):
+                expected_ids = {
+                    str(getattr(rec, "post_id", "") or "")
+                    for rec in (ctx.get("probe_new_records") or [])
+                }
+                expected_ids.discard("")
+                if expected_ids:
+                    verified_before_recovery = len(self.verified_file_paths)
+                    actual_new = new_media_since_snapshot(
+                        self.preexisting_media,
+                        self.verification_root,
+                        recursive=self.verification_recursive,
+                    )
+                    for candidate in actual_new:
+                        if any(post_id in candidate.name for post_id in expected_ids):
+                            self._verify_file_path(str(candidate))
+                    recovered_count = len(self.verified_file_paths) - verified_before_recovery
+
             verified_keys = {normalized_local_path(x) for x in self.verified_file_paths}
             missing = []
             for raw in self.reported_file_paths:
@@ -455,6 +484,11 @@ class DownloadJob(QWidget):
                     if key and key in self.preexisting_media and p.is_file() and p.stat().st_size > 0:
                         continue
                     missing.append(raw)
+            # The recovered files correspond one-for-one with successful
+            # after-events.  Their original text may be irreversibly mojibaked,
+            # so clear that many unmatched notification strings by count.
+            if recovered_count and missing:
+                missing = missing[recovered_count:]
             self.missing_reported_paths = list(dict.fromkeys(missing))
         except Exception as exc:
             self.verification_error = str(exc)
