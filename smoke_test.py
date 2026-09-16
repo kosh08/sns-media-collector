@@ -18,6 +18,9 @@ def snowflake(dt: datetime) -> int:
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     print("SNS Media Collector startup smoke test")
     print("Python:", sys.version)
 
@@ -76,6 +79,7 @@ def main() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     with tempfile.TemporaryDirectory(prefix="smc-smoke-") as td:
         os.environ["SMC_TEST_DATA_DIR"] = td
+        w = None
         try:
             from PySide6.QtWidgets import QApplication
             from app import MainWindow
@@ -173,6 +177,8 @@ def main() -> int:
             traceback.print_exc()
             return 13
         finally:
+            if w is not None:
+                w.close()
             os.environ.pop("SMC_TEST_DATA_DIR", None)
 
     # 4) Verify gallery-dl CLI entry point itself.
