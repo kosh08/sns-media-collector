@@ -1,6 +1,7 @@
 """Offline regressions using real Qt processes and persistent SQLite."""
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+os.environ.setdefault('QTWEBENGINE_DISABLE_SANDBOX', '1')
 import json
 from pathlib import Path
 import sys
@@ -8,7 +9,8 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QProcess, QUrl
+from PySide6.QtWidgets import QApplication, QDialog
 from app import MainWindow, DownloadJob
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 APP = QApplication.instance() or QApplication([])
@@ -235,6 +237,86 @@ class Regressions(unittest.TestCase):
         self.w.save_accounts()
         self.w.close(); self.w = MainWindow(); self.w.start_next_job = lambda: None
         self.assertEqual(Path(self.w.accounts[0].auth_value), expected)
+
+    def test_new_x_account_defaults_to_isolated_login(self):
+        from app import AccountDialog
+        dialog = AccountDialog(self.w, data_dir=self.root, engine=[sys.executable])
+        self.assertEqual(dialog.platform.currentData(), 'x')
+        self.assertEqual(dialog.auth_mode.currentData(), 'managed_x')
+        self.assertTrue(dialog.auth_value.isReadOnly())
+        dialog.platform.setCurrentIndex(dialog.platform.findData('pixiv'))
+        self.assertEqual(dialog.auth_mode.currentData(), 'managed_pixiv')
+        self.assertTrue(dialog.auth_value.isReadOnly())
+        dialog.platform.setCurrentIndex(dialog.platform.findData('x'))
+        self.assertEqual(dialog.auth_mode.currentData(), 'managed_x')
+        dialog.close()
+
+    def test_account_list_shows_managed_login_readiness(self):
+        from app import AccountProfile
+        from auth_store import BrowserCookie, managed_x_cookie_path, write_netscape_cookie_file
+        ready = AccountProfile('ready', 'x', 'managed_x', '', 'ready-id')
+        missing = AccountProfile('missing', 'x', 'managed_x', '', 'missing-id')
+        ready.auth_value = str(managed_x_cookie_path(self.root, ready.profile_id))
+        missing.auth_value = str(managed_x_cookie_path(self.root, missing.profile_id))
+        write_netscape_cookie_file(Path(ready.auth_value), [
+            BrowserCookie('.x.com', '/', True, 0, 'auth_token', 'secret'),
+        ])
+        self.w.accounts = [ready, missing]
+        self.w.refresh_accounts(ready.profile_id)
+        self.assertIn('✓', self.w.account_list.item(0).text())
+        self.assertIn('⚠', self.w.account_list.item(1).text())
+
+    def test_managed_pixiv_account_path_survives_restart(self):
+        from app import AccountProfile
+        from auth_store import managed_pixiv_cache_path
+        profile = AccountProfile('pixiv-main', 'pixiv', 'managed_pixiv', 'obsolete.sqlite3')
+        self.w.accounts = [profile]
+        self.w.save_accounts()
+        self.w.close(); self.w = MainWindow(); self.w.start_next_job = lambda: None
+        self.assertEqual(
+            Path(self.w.accounts[0].auth_value),
+            managed_pixiv_cache_path(self.root, profile.profile_id),
+        )
+
+    def test_managed_pixiv_missing_cache_is_blocked_before_gallery_dl(self):
+        with self.assertRaisesRegex(ValueError, '未連携'):
+            self.w.ensure_auth_ready('managed_pixiv', str(self.root / 'missing.sqlite3'))
+
+    def test_pixiv_login_dialog_captures_callback_and_uses_isolated_cache(self):
+        try:
+            from PySide6.QtWebEngineCore import QWebEngineProfile  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f'QtWebEngine runtime unavailable: {exc}')
+        from app import PixivLoginDialog
+        from auth_store import inspect_pixiv_cache, managed_pixiv_cache_path
+        cache = managed_pixiv_cache_path(self.root, 'oauth-flow')
+        source = (
+            "import sys,sqlite3,pickle,pathlib; p=pathlib.Path(sys.argv[1]); "
+            "print('https://app-api.pixiv.net/web/v1/login?client=pixiv-android&code_challenge=test',flush=True); "
+            "line=sys.stdin.readline(); assert 'code=sample-code' in line; p.parent.mkdir(parents=True,exist_ok=True); "
+            "c=sqlite3.connect(p); c.execute('CREATE TABLE data (key TEXT PRIMARY KEY,value TEXT,expires INTEGER)'); "
+            "c.execute('INSERT INTO data VALUES (?,?,?)',('gallery_dl.extractor.pixiv._refresh_token_cache-None',pickle.dumps('secret'),0)); "
+            "c.commit(); c.close()"
+        )
+        dialog = PixivLoginDialog(
+            self.root, 'oauth-flow', cache,
+            [sys.executable, '-c', source, str(cache)], self.w,
+        )
+        limit = time.monotonic() + 5
+        while not dialog._login_url_loaded and time.monotonic() < limit:
+            APP.processEvents(); time.sleep(.01)
+        self.assertTrue(dialog._login_url_loaded)
+        with patch('app.QMessageBox.information', return_value=0):
+            dialog._url_changed(QUrl(
+                'https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback?code=sample-code'
+            ))
+            limit = time.monotonic() + 5
+            while dialog.process.state() != QProcess.NotRunning and time.monotonic() < limit:
+                APP.processEvents(); time.sleep(.01)
+            APP.processEvents()
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertTrue(inspect_pixiv_cache(cache)['authenticated'])
+        dialog.close()
 
     def test_managed_x_missing_cookie_is_blocked_before_gallery_dl(self):
         with self.assertRaisesRegex(ValueError, '未ログイン'):

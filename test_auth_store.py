@@ -1,10 +1,14 @@
 from pathlib import Path
+import pickle
+import sqlite3
 import tempfile
 import unittest
 
 from auth_store import (
-    BrowserCookie, import_netscape_cookie_file, inspect_netscape_cookie_file,
-    managed_x_cookie_path, managed_x_web_profile_dir, write_netscape_cookie_file,
+    BrowserCookie, classify_pixiv_auth_test, classify_x_auth_test,
+    import_netscape_cookie_file, inspect_netscape_cookie_file, inspect_pixiv_cache,
+    managed_pixiv_cache_path, managed_x_cookie_path, managed_x_web_profile_dir,
+    write_netscape_cookie_file,
 )
 from core import build_x_likes_probe_command
 
@@ -66,7 +70,53 @@ class AuthStoreTests(unittest.TestCase):
         )
         self.assertIn("--cookies", cmd)
         self.assertNotIn("--cookies-from-browser", cmd)
+        self.assertIn("--config-ignore", cmd)
         self.assertEqual(cmd[cmd.index("--cookies") + 1], "account.txt")
+
+    def test_auth_probe_classifies_known_failures_without_echoing_output(self):
+        secret = "secret-local-path-and-cookie-value"
+        ok, message = classify_x_auth_test(
+            1, f"[twitter][error] Could not authenticate you {secret}"
+        )
+        self.assertFalse(ok)
+        self.assertIn("Cookie", message)
+        self.assertNotIn(secret, message)
+
+        ok, message = classify_x_auth_test(
+            1, "[cookies][warning] Failed to decrypt cookie (DPAPI)"
+        )
+        self.assertFalse(ok)
+        self.assertIn("アプリ内Xログイン", message)
+
+        self.assertEqual(
+            classify_x_auth_test(0, "bookmark probe completed"),
+            (True, "X認証OK。このアカウントで取得できます。"),
+        )
+
+    def test_pixiv_cache_is_per_account_and_inspected_without_token_value(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "日本語 # auth"
+            path = managed_pixiv_cache_path(root, "pixiv-one")
+            self.assertNotEqual(path, managed_pixiv_cache_path(root, "pixiv-two"))
+            self.assertFalse(inspect_pixiv_cache(path)["authenticated"])
+            path.parent.mkdir(parents=True)
+            con = sqlite3.connect(path)
+            con.execute("CREATE TABLE data (key TEXT PRIMARY KEY, value TEXT, expires INTEGER)")
+            con.execute(
+                "INSERT INTO data VALUES (?,?,?)",
+                ("gallery_dl.extractor.pixiv._refresh_token_cache-None",
+                 pickle.dumps("SUPER-SECRET-REFRESH-TOKEN"), 0),
+            )
+            con.commit(); con.close()
+            result = inspect_pixiv_cache(path)
+            self.assertTrue(result["authenticated"])
+            self.assertNotIn("SUPER-SECRET", repr(result))
+
+    def test_pixiv_auth_probe_classifies_invalid_token(self):
+        ok, message = classify_pixiv_auth_test(1, "AuthenticationError: Invalid refresh token")
+        self.assertFalse(ok)
+        self.assertIn("無効", message)
+        self.assertTrue(classify_pixiv_auth_test(0, "ok")[0])
 
 
 if __name__ == "__main__":

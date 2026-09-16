@@ -676,12 +676,16 @@ def import_x_likes_seen_archive(
 
 
 def _append_auth(cmd: list[str], platform: str, auth_mode: str, auth_value: str) -> None:
-    if auth_mode in {"cookies_file", "managed_x"} and auth_value:
+    if auth_mode == "managed_x" and auth_value:
+        cmd += ["--config-ignore", "--cookies", auth_value]
+    elif auth_mode == "cookies_file" and auth_value:
         cmd += ["--cookies", auth_value]
     elif auth_mode == "browser" and auth_value:
         cmd += ["--cookies-from-browser", auth_value]
     elif platform == "pixiv" and auth_mode == "pixiv_token" and auth_value:
         cmd += ["-o", f"refresh-token={auth_value}"]
+    elif platform == "pixiv" and auth_mode == "managed_pixiv" and auth_value:
+        cmd += ["--config-ignore", "--cache-file", auth_value, "-o", "refresh-token=cache"]
 
 
 def build_x_likes_baseline_command(
@@ -780,12 +784,16 @@ def build_command(
         str(destination),
     ]
 
-    if auth_mode in {"cookies_file", "managed_x"} and auth_value:
+    if auth_mode == "managed_x" and auth_value:
+        cmd += ["--config-ignore", "--cookies", auth_value]
+    elif auth_mode == "cookies_file" and auth_value:
         cmd += ["--cookies", auth_value]
     elif auth_mode == "browser" and auth_value:
         cmd += ["--cookies-from-browser", auth_value]
     elif platform == "pixiv" and auth_mode == "pixiv_token" and auth_value:
         cmd += ["-o", f"refresh-token={auth_value}"]
+    elif platform == "pixiv" and auth_mode == "managed_pixiv" and auth_value:
+        cmd += ["--config-ignore", "--cache-file", auth_value, "-o", "refresh-token=cache"]
 
     ext = [x.lower().lstrip(".") for x in extensions if x]
     if ext:

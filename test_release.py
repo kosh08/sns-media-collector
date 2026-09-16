@@ -41,4 +41,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('PySide6.QtWebEngineCore', source)
         self.assertIn('PySide6.QtWebEngineWidgets', source)
 
+    def test_release_notes_are_used_for_public_release(self):
+        workflow=(build_release.ROOT / '.github/workflows/windows-installer.yml').read_text(encoding='utf-8')
+        self.assertIn('--notes-file RELEASE_NOTES.md', workflow)
+        self.assertTrue((build_release.ROOT / 'RELEASE_NOTES.md').is_file())
+
 if __name__ == '__main__': unittest.main()

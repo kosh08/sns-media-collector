@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 from typing import Iterable
 
@@ -36,6 +37,43 @@ def managed_x_web_profile_dir(data_dir: Path, profile_id: str) -> Path:
     if not safe_id:
         raise ValueError("認証プロファイルIDが不正です。")
     return Path(data_dir) / "auth" / "web-profiles" / f"x-{safe_id}"
+
+
+def managed_pixiv_cache_path(data_dir: Path, profile_id: str) -> Path:
+    """Return the account-specific gallery-dl cache containing pixiv OAuth."""
+    safe_id = "".join(ch for ch in str(profile_id) if ch.isalnum())
+    if not safe_id:
+        raise ValueError("認証プロファイルIDが不正です。")
+    return Path(data_dir) / "auth" / "pixiv" / f"pixiv-{safe_id}.sqlite3"
+
+
+def managed_pixiv_web_profile_dir(data_dir: Path, profile_id: str) -> Path:
+    safe_id = "".join(ch for ch in str(profile_id) if ch.isalnum())
+    if not safe_id:
+        raise ValueError("認証プロファイルIDが不正です。")
+    return Path(data_dir) / "auth" / "web-profiles" / f"pixiv-{safe_id}"
+
+
+def inspect_pixiv_cache(path: Path) -> dict:
+    """Check for a cached pixiv refresh token without reading its value."""
+    path = Path(path)
+    if not path.is_file():
+        return {"exists": False, "authenticated": False, "error": ""}
+    try:
+        # The existence check above prevents accidental creation.  A plain
+        # path is more reliable than SQLite URI parsing for Windows user names
+        # containing spaces, '#' or non-ASCII characters.
+        con = sqlite3.connect(str(path))
+        try:
+            row = con.execute(
+                "SELECT 1 FROM data WHERE key LIKE ? LIMIT 1",
+                ("gallery_dl.extractor.pixiv._refresh_token_cache-%",),
+            ).fetchone()
+        finally:
+            con.close()
+        return {"exists": True, "authenticated": bool(row), "error": ""}
+    except (OSError, sqlite3.Error) as exc:
+        return {"exists": True, "authenticated": False, "error": str(exc)}
 
 
 def inspect_netscape_cookie_file(path: Path) -> dict:
@@ -159,3 +197,41 @@ def import_netscape_cookie_file(source: Path, destination: Path) -> dict:
             pass
         raise
     return inspect_netscape_cookie_file(destination)
+
+
+def classify_x_auth_test(returncode: int, output: str) -> tuple[bool, str]:
+    """Turn gallery-dl's auth probe result into a safe, actionable message.
+
+    The raw output can contain local paths and extractor details, so callers
+    should show this summary instead of echoing the complete process output.
+    """
+    text = str(output or "").lower()
+    if "failed to decrypt cookie" in text or "dpapi" in text:
+        return False, (
+            "ブラウザCookieをWindowsで復号できませんでした。"
+            "アプリ内Xログイン（推奨）を使ってください。"
+        )
+    if any(marker in text for marker in (
+        "could not authenticate you", "authrequired", "authenticated cookies needed",
+        "login required", "authentication required",
+    )):
+        return False, "XがCookieを拒否しました。Xログインを更新してください。"
+    if "rate" in text and "limit" in text:
+        return False, "Xのアクセス制限中です。時間を置いて再確認してください。"
+    if returncode != 0 or "[twitter][error]" in text:
+        return False, "X認証を確認できませんでした。ログインを更新してから再試行してください。"
+    return True, "X認証OK。このアカウントで取得できます。"
+
+
+def classify_pixiv_auth_test(returncode: int, output: str) -> tuple[bool, str]:
+    """Summarize a pixiv gallery-dl probe without exposing its token."""
+    text = str(output or "").lower()
+    if "invalid refresh token" in text:
+        return False, "pixivの連携情報が無効です。pixivログインを更新してください。"
+    if "'refresh-token' required" in text or "authenticationerror" in text:
+        return False, "pixivの連携情報がありません。pixivへログインしてください。"
+    if "rate" in text and "limit" in text:
+        return False, "pixivのアクセス制限中です。時間を置いて再確認してください。"
+    if returncode != 0 or "[pixiv][error]" in text:
+        return False, "pixiv認証を確認できませんでした。ログインを更新してから再試行してください。"
+    return True, "pixiv認証OK。このアカウントで取得できます。"

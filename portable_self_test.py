@@ -52,8 +52,8 @@ def run(output: str) -> int:
                 result = subprocess.run(command + ['--ignore-config', '--list-modules'], capture_output=True,
                     text=True, encoding='utf-8', errors='replace', timeout=30)
                 assert result.returncode == 0, result.stderr
-                assert 'twitter' in result.stdout and 'pixiv' in result.stdout, result.stdout[-1000:]
-                report['checks'].append('bundled engine and X/pixiv extractor modules')
+                assert all(name in result.stdout for name in ('twitter', 'pixiv', 'oauth')), result.stdout[-1000:]
+                report['checks'].append('bundled engine and X/pixiv/OAuth extractor modules')
                 # Importing these from the frozen build proves that the isolated
                 # per-account X login window and its QtWebEngine runtime shipped.
                 from PySide6.QtWebEngineCore import QWebEngineProfile  # noqa: F401

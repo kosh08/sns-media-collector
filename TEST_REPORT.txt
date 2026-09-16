@@ -1,110 +1,23 @@
-SNS Media Collector 0.3.0 installer source readiness
-Date: 2026-09-16
-Linux / Python 3.12 / PySide6 6.11.2 / gallery-dl 1.32.12
+SNS Media Collector v0.3.4 validation
 
-PASS: 47 core/release tests + 20 Qt regressions = 67 tests.
-PASS: Real Qt startup smoke, gallery-dl offline archive tests.
-PASS: Python 3.10 syntax and source compilation.
-PASS: Windows cmd/bat ASCII/CRLF; workflow YAML parse.
+Local validation:
+- Python 3.10 syntax compatibility
+- 61 core/auth/release/updater tests
+- 28 Qt/process/SQLite regressions
+- Real gallery-dl save + archive skip test
+- Qt MainWindow startup smoke test
+- gallery-dl 1.32.12 X/pixiv extractor presence
 
-NOT RUN: Inno Setup compilation, Windows installer execution, actual Windows
-upgrade/uninstall regression, Windows mutex, GitHub workflow run.
-No completed Windows Setup EXE exists yet.
-Blocked on an accessible dedicated GitHub repository for Windows CI.
-Prepared workflow creates a private artifact only, not a public release.
-The application-internal automatic updater remains a later step.
+The pixiv embedded-browser callback regression requires a working QtWebEngine
+runtime. It runs on the Windows release runner. The Linux workspace can skip
+that one test when optional X11 runtime libraries are unavailable.
 
-Full local validation:
+Release validation:
+The Windows workflow runs full_test.py before packaging, then verifies the
+frozen app, bundled gallery-dl and updater, installer creation, clean install,
+upgrade, reinstall, installed-app self-test, uninstall, user-data preservation,
+and SHA-256 generation. A GitHub Release is published only if every step passes.
+The machine-readable result ships beside each installer as release-check.json.
 
-test_anchor_boundary_only_returns_records_before_first_anchor (test_core.CoreTests.test_anchor_boundary_only_returns_records_before_first_anchor) ... ok
-test_anchor_catalog_replace_and_rotate (test_core.CoreTests.test_anchor_catalog_replace_and_rotate) ... ok
-test_anchor_command_is_bounded_no_download_scan (test_core.CoreTests.test_anchor_command_is_bounded_no_download_scan) ... ok
-test_anchor_not_found_is_safe_zero_download_boundary (test_core.CoreTests.test_anchor_not_found_is_safe_zero_download_boundary) ... ok
-test_append_urls_replaces_single_input_url (test_core.CoreTests.test_append_urls_replaces_single_input_url) ... ok
-test_archive_path_scopes_target_type (test_core.CoreTests.test_archive_path_scopes_target_type) ... ok
-test_core_rejects_old_abort_style_likes_incremental (test_core.CoreTests.test_core_rejects_old_abort_style_likes_incremental) ... ok
-test_download_command_emits_after_file_event_for_live_preview (test_core.CoreTests.test_download_command_emits_after_file_event_for_live_preview) ... ok
-test_download_command_keeps_explorer_mtime_current (test_core.CoreTests.test_download_command_keeps_explorer_mtime_current) ... ok
-test_existing_folder_index_does_not_require_json (test_core.CoreTests.test_existing_folder_index_does_not_require_json) ... ok
-test_file_event_parser_keeps_windows_path (test_core.CoreTests.test_file_event_parser_keeps_windows_path) ... ok
-test_gallery_datetime_python310_compatible_offset (test_core.CoreTests.test_gallery_datetime_python310_compatible_offset) ... ok
-test_hitomi_baseline_is_used_before_first_success (test_core.CoreTests.test_hitomi_baseline_is_used_before_first_success) ... ok
-test_hitomi_filename_parser_p0_and_p1 (test_core.CoreTests.test_hitomi_filename_parser_p0_and_p1) ... ok
-test_hitomi_import_drives_first_incremental_command_end_to_end (test_core.CoreTests.test_hitomi_import_drives_first_incremental_command_end_to_end) ... ok
-test_hitomi_import_is_idempotent (test_core.CoreTests.test_hitomi_import_is_idempotent) ... ok
-test_hitomi_import_writes_gallery_dl_compatible_archive_keys (test_core.CoreTests.test_hitomi_import_writes_gallery_dl_compatible_archive_keys) ... ok
-test_hitomi_scan_counts_unmatched (test_core.CoreTests.test_hitomi_scan_counts_unmatched) ... ok
-test_incremental_overlap (test_core.CoreTests.test_incremental_overlap) ... ok
-test_likes_anchor_selection_reserves_latest_and_caps_window (test_core.CoreTests.test_likes_anchor_selection_reserves_latest_and_caps_window) ... ok
-test_likes_baseline_archive_prevents_deleted_items_from_returning (test_core.CoreTests.test_likes_baseline_archive_prevents_deleted_items_from_returning) ... ok
-test_likes_baseline_command_is_no_download_print_scan (test_core.CoreTests.test_likes_baseline_command_is_no_download_print_scan) ... ok
-test_likes_baseline_reserves_latest_posts_in_timeline_order (test_core.CoreTests.test_likes_baseline_reserves_latest_posts_in_timeline_order) ... ok
-test_likes_post_urls_deduplicate_posts (test_core.CoreTests.test_likes_post_urls_deduplicate_posts) ... ok
-test_likes_seen_catalog_roundtrip (test_core.CoreTests.test_likes_seen_catalog_roundtrip) ... ok
-test_normalize_x_media (test_core.CoreTests.test_normalize_x_media) ... ok
-test_parse_internal_metadata_and_catalog (test_core.CoreTests.test_parse_internal_metadata_and_catalog) ... ok
-test_parse_likes_seen_line (test_core.CoreTests.test_parse_likes_seen_line) ... ok
-test_pixiv_command_does_not_receive_x_compat_options (test_core.CoreTests.test_pixiv_command_does_not_receive_x_compat_options) ... ok
-test_pixiv_download_also_emits_live_preview_file_event (test_core.CoreTests.test_pixiv_download_also_emits_live_preview_file_event) ... ok
-test_probe_command_is_bounded_no_download_scan (test_core.CoreTests.test_probe_command_is_bounded_no_download_scan) ... ok
-test_real_scan_takes_priority_over_hitomi_baseline (test_core.CoreTests.test_real_scan_takes_priority_over_hitomi_baseline) ... ok
-test_recent_files_catalog_roundtrip_and_metadata_join (test_core.CoreTests.test_recent_files_catalog_roundtrip_and_metadata_join) ... ok
-test_save_integrity_blocks_state_advance_on_missing_reported_file (test_core.CoreTests.test_save_integrity_blocks_state_advance_on_missing_reported_file) ... ok
-test_save_snapshot_detects_only_new_files_without_using_mtime (test_core.CoreTests.test_save_snapshot_detects_only_new_files_without_using_mtime) ... ok
-test_save_snapshot_recursive_mode_finds_nested_download (test_core.CoreTests.test_save_snapshot_recursive_mode_finds_nested_download) ... ok
-test_store_roundtrip_new_fields (test_core.CoreTests.test_store_roundtrip_new_fields) ... ok
-test_tweet_snowflake_roundtrip_date (test_core.CoreTests.test_tweet_snowflake_roundtrip_date) ... ok
-test_upgrade_migrates_v014_hitomi_baseline (test_core.CoreTests.test_upgrade_migrates_v014_hitomi_baseline) ... ok
-test_x_command_archive_path_matches_import_path_helper (test_core.CoreTests.test_x_command_archive_path_matches_import_path_helper) ... ok
-test_x_command_is_hitomi_compatible_without_json_sidecars (test_core.CoreTests.test_x_command_is_hitomi_compatible_without_json_sidecars) ... ok
-test_x_command_uses_hitomi_baseline_on_first_run (test_core.CoreTests.test_x_command_uses_hitomi_baseline_on_first_run) ... ok
-test_x_incremental_without_baseline_refuses_silent_full_download (test_core.CoreTests.test_x_incremental_without_baseline_refuses_silent_full_download) ... ok
-test_failed_or_stale_self_test_cannot_approve_bundle (test_release.ReleaseTests.test_failed_or_stale_self_test_cannot_approve_bundle) ... ok
-test_installer_only_targets_versioned_application_files (test_release.ReleaseTests.test_installer_only_targets_versioned_application_files) ... ok
-test_version_rejects_path_and_preprocessor_input (test_release.ReleaseTests.test_version_rejects_path_and_preprocessor_input) ... ok
-test_windows_builder_refuses_non_windows (test_release.ReleaseTests.test_windows_builder_refuses_non_windows) ... ok
-
-----------------------------------------------------------------------
-Ran 47 tests in 0.017s
-
-OK
-test_archived_probe_repairs_boundary_and_second_probe_after_restart_is_empty (test_regressions.Regressions.test_archived_probe_repairs_boundary_and_second_probe_after_restart_is_empty) ... ok
-test_atomic_json_failure_preserves_settings (test_regressions.Regressions.test_atomic_json_failure_preserves_settings) ... ok
-test_cancelled_probe_never_queues_even_when_anchor_was_seen (test_regressions.Regressions.test_cancelled_probe_never_queues_even_when_anchor_was_seen) ... ok
-test_corrupt_archive_holds_boundary (test_regressions.Regressions.test_corrupt_archive_holds_boundary) ... ok
-test_deleted_saved_account_does_not_select_another_login (test_regressions.Regressions.test_deleted_saved_account_does_not_select_another_login) ... ok
-test_failed_engine_start_finishes_once (test_regressions.Regressions.test_failed_engine_start_finishes_once) ... ok
-test_folder_preview_does_not_pollute_download_history (test_regressions.Regressions.test_folder_preview_does_not_pollute_download_history) ... ok
-test_legacy_accounts_migrate_and_refresh_preserves_selection (test_regressions.Regressions.test_legacy_accounts_migrate_and_refresh_preserves_selection) ... ok
-test_missing_report_blocks_even_with_archive_entry (test_regressions.Regressions.test_missing_report_blocks_even_with_archive_entry) ... ok
-test_one_archived_image_does_not_skip_second_image (test_regressions.Regressions.test_one_archived_image_does_not_skip_second_image) ... ok
-test_partial_success_holds_boundary_even_with_exit_zero (test_regressions.Regressions.test_partial_success_holds_boundary_even_with_exit_zero) ... ok
-test_real_gallery_cli_saves_then_skips_using_archive (test_regressions.Regressions.test_real_gallery_cli_saves_then_skips_using_archive) ... ok
-test_real_process_final_output_without_newline_and_unicode_path (test_regressions.Regressions.test_real_process_final_output_without_newline_and_unicode_path) ... ok
-test_restart_restores_selected_account_target_and_destination (test_regressions.Regressions.test_restart_restores_selected_account_target_and_destination) ... ok
-test_retry_completes_without_metadata_capture (test_regressions.Regressions.test_retry_completes_without_metadata_capture) ... ok
-test_stop_does_not_advance (test_regressions.Regressions.test_stop_does_not_advance) ... ok
-test_test_settings_do_not_use_user_registry (test_regressions.Regressions.test_test_settings_do_not_use_user_registry) ... ok
-test_unrelated_and_outside_files_never_count (test_regressions.Regressions.test_unrelated_and_outside_files_never_count) ... ok
-test_utf8_split_across_process_reads_keeps_japanese_path (test_regressions.Regressions.test_utf8_split_across_process_reads_keeps_japanese_path) ... ok
-test_zero_length_hitomi_file_is_not_acquired (test_regressions.Regressions.test_zero_length_hitomi_file_is_not_acquired) ... ok
-
-----------------------------------------------------------------------
-Ran 20 tests in 1.300s
-
-OK
-1.32.12
-SNS Media Collector startup smoke test
-Python: 3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]
-PySide6: 6.11.2
-gallery-dl: 1.32.12
-Hitomi + Likes archive compatibility: OK
-Strict save verification gate: OK
-Recent-download gallery: OK
-Qt MainWindow: OK
-Media + Likes anchor command generation: OK - X / 認証なし / smc_test_user / media
-gallery-dl CLI: OK
-STARTUP SMOKE TEST PASSED
-SNS Media Collector full test
-Python: 3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]
-Python 3.10 syntax compatibility: OK
+Real X/pixiv credentials are intentionally not present in automated tests.
+Final live-site authentication is verified on the user's own Windows account.

@@ -276,6 +276,21 @@ class CoreTests(unittest.TestCase):
             self.assertNotIn("SUPERSECRET", redacted)
             self.assertIn("refresh-token=<hidden>", redacted)
 
+    def test_managed_pixiv_uses_isolated_cache_instead_of_plaintext_token(self):
+        with tempfile.TemporaryDirectory() as td:
+            cmd = build_command(
+                ["gallery-dl"], platform="pixiv", url="https://www.pixiv.net/users/123",
+                destination=Path(td), account_name="pix", auth_mode="managed_pixiv",
+                auth_value=str(Path(td) / "pixiv.sqlite3"), archive_scope="pixiv:123:media",
+                extensions=["jpg"], capture_internal_metadata=False, use_archive=False,
+                archive_dir=Path(td) / "archives", direct_folder=True, range_mode="all",
+                profile=None,
+            )
+            self.assertIn("--cache-file", cmd)
+            self.assertIn("--config-ignore", cmd)
+            self.assertEqual(cmd[cmd.index("--cache-file") + 1], str(Path(td) / "pixiv.sqlite3"))
+            self.assertIn("refresh-token=cache", cmd)
+
 
     def test_gallery_datetime_python310_compatible_offset(self):
         dt = parse_gallery_datetime("2026-08-09T12:00:00+0900")

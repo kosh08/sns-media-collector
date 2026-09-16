@@ -5,16 +5,15 @@ import codecs
 import uuid
 import os
 import re
-import shutil
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QThread, QTimer, QUrl, QUrlQuery, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QPixmap
 
 from core import (
@@ -30,17 +29,19 @@ from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QInputDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QProgressBar,
-    QRadioButton, QScrollArea, QSpinBox, QSplitter, QStackedWidget,
-    QTextEdit, QToolButton, QVBoxLayout, QWidget
+    QRadioButton, QScrollArea, QSpinBox, QSplitter,
+    QTextEdit, QVBoxLayout, QWidget
 )
 from updater_core import download_update, fetch_latest_update
 from auth_store import (
-    BrowserCookie, import_netscape_cookie_file, inspect_netscape_cookie_file,
+    BrowserCookie, classify_pixiv_auth_test, classify_x_auth_test,
+    import_netscape_cookie_file, inspect_netscape_cookie_file, inspect_pixiv_cache,
+    managed_pixiv_cache_path, managed_pixiv_web_profile_dir,
     managed_x_cookie_path, managed_x_web_profile_dir, write_netscape_cookie_file,
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.4"
 
 
 class UpdateCheckWorker(QThread):
@@ -118,7 +119,7 @@ QScrollBar::handle:vertical { background: #35445f; min-height: 28px; border-radi
 class AccountProfile:
     name: str
     platform: str  # x | pixiv
-    auth_mode: str = "none"  # none | managed_x | cookies_file | browser | pixiv_token
+    auth_mode: str = "none"  # none | managed_x | managed_pixiv | cookies_file | browser | pixiv_token
     auth_value: str = ""
     profile_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
@@ -155,18 +156,25 @@ class XLoginDialog(QDialog):
         )
         self.cookie_store = self.web_profile.cookieStore()
         self.cookie_store.cookieAdded.connect(self._cookie_added)
+        self.cookie_store.cookieRemoved.connect(self._cookie_removed)
         self.page = QWebEnginePage(self.web_profile, self)
         self.view = QWebEngineView(self)
         self.view.setPage(self.page)
         layout.addWidget(self.view, 1)
         buttons = QHBoxLayout()
-        external = QPushButton("外部ブラウザでXを開く")
-        external.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://x.com/home")))
+        login = QPushButton("ログイン画面")
+        login.clicked.connect(lambda: self.view.setUrl(QUrl("https://x.com/i/flow/login")))
+        home = QPushButton("Xホーム")
+        home.clicked.connect(lambda: self.view.setUrl(QUrl("https://x.com/home")))
+        reset = QPushButton("この画面のログインを消去")
+        reset.setObjectName("danger")
+        reset.clicked.connect(self._reset_login)
         self.save_button = QPushButton("このログインを保存")
         self.save_button.setObjectName("primary")
         self.save_button.clicked.connect(self._collect_and_save)
         close = QPushButton("閉じる"); close.clicked.connect(self.reject)
-        buttons.addWidget(external); buttons.addStretch(); buttons.addWidget(close); buttons.addWidget(self.save_button)
+        buttons.addWidget(login); buttons.addWidget(home); buttons.addWidget(reset)
+        buttons.addStretch(); buttons.addWidget(close); buttons.addWidget(self.save_button)
         layout.addLayout(buttons)
         self.cookie_store.loadAllCookies()
         self.view.setUrl(QUrl("https://x.com/i/flow/login"))
@@ -188,6 +196,35 @@ class XLoginDialog(QDialog):
         except Exception:
             return
 
+    def _cookie_removed(self, cookie):
+        try:
+            domain = str(cookie.domain())
+            name = bytes(cookie.name()).decode("utf-8", "replace")
+            path = str(cookie.path()) or "/"
+            self._cookies.pop((domain, path, name), None)
+            if name == "auth_token":
+                self.status.setText("Xからログアウトしました。再ログインしてから保存してください。")
+        except Exception:
+            return
+
+    def _reset_login(self):
+        answer = QMessageBox.question(
+            self,
+            "このログインを消去",
+            "このアカウント専用画面のXログインと、保存済みCookieを消去します。\n\n続行しますか？",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._cookies.clear()
+        self.cookie_store.deleteAllCookies()
+        try:
+            self.cookie_path.unlink(missing_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "ログインを消去できません", str(exc))
+            return
+        self.status.setText("ログインを消去しました。使用するXアカウントでログインしてください。")
+        self.view.setUrl(QUrl("https://x.com/i/flow/login"))
+
     def _collect_and_save(self):
         self.save_button.setEnabled(False)
         self.status.setText("Cookieを確認しています…")
@@ -204,6 +241,113 @@ class XLoginDialog(QDialog):
             self.save_button.setEnabled(True)
             self.status.setText("XのログインCookieを保存できませんでした。")
             QMessageBox.warning(self, "Xログインが必要です", str(exc))
+
+
+class PixivLoginDialog(QDialog):
+    """Run gallery-dl's PKCE flow in an isolated embedded browser."""
+    def __init__(self, data_dir: Path, profile_id: str, cache_path: Path,
+                 engine: list[str], parent=None):
+        super().__init__(parent)
+        self.cache_path = Path(cache_path)
+        self.engine = list(engine)
+        self._oauth_output = ""
+        self._login_url_loaded = False
+        self._code_sent = False
+        self._cancelled = False
+        self.setWindowTitle("pixivログイン / 連携更新")
+        self.resize(1040, 760)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "この画面はこのpixivアカウント専用です。ログイン後の認証コードはアプリが自動で受け取り、"
+            "アカウント別の安全なキャッシュへ保存します。開発者ツールやコピー操作は不要です。"
+        )
+        note.setWordWrap(True); note.setObjectName("muted")
+        layout.addWidget(note)
+        self.status = QLabel("pixivの認証画面を準備しています…")
+        self.status.setWordWrap(True); layout.addWidget(self.status)
+        try:
+            from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+        except Exception as exc:
+            raise RuntimeError(f"アプリ内pixivログイン機能を読み込めませんでした: {exc}") from exc
+        web_root = managed_pixiv_web_profile_dir(data_dir, profile_id)
+        web_root.mkdir(parents=True, exist_ok=True)
+        self.web_profile = QWebEngineProfile(f"smc-pixiv-{profile_id}", self)
+        self.web_profile.setPersistentStoragePath(str(web_root / "storage"))
+        self.web_profile.setCachePath(str(web_root / "cache"))
+        self.web_profile.setPersistentCookiesPolicy(
+            QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
+        )
+        self.page = QWebEnginePage(self.web_profile, self)
+        self.view = QWebEngineView(self); self.view.setPage(self.page)
+        self.view.urlChanged.connect(self._url_changed)
+        layout.addWidget(self.view, 1)
+        buttons = QHBoxLayout(); buttons.addStretch()
+        cancel = QPushButton("キャンセル"); cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel); layout.addLayout(buttons)
+
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self._read_process)
+        self.process.finished.connect(self._process_finished)
+        self.process.errorOccurred.connect(self._process_error)
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        command = self.engine + [
+            "--ignore-config", "--no-colors", "--cache-file", str(self.cache_path),
+            "-o", "browser=false", "oauth:pixiv",
+        ]
+        self.process.start(command[0], command[1:])
+
+    def _read_process(self):
+        chunk = bytes(self.process.readAllStandardOutput()).decode("utf-8", "replace")
+        self._oauth_output = (self._oauth_output + chunk)[-65536:]
+        if not self._login_url_loaded:
+            match = re.search(r"https://app-api\.pixiv\.net/web/v1/login\?[^\s]+", self._oauth_output)
+            if match:
+                self._login_url_loaded = True
+                self.status.setText("pixivへログインしてください。完了後は自動で連携します。")
+                self.view.setUrl(QUrl(match.group(0)))
+
+    def _url_changed(self, url: QUrl):
+        if self._code_sent:
+            return
+        if "/web/v1/users/auth/pixiv/callback" not in url.path():
+            return
+        code = QUrlQuery(url).queryItemValue("code")
+        if not code:
+            return
+        self._code_sent = True
+        self.status.setText("pixivの認証情報を安全に保存しています…")
+        self.process.write((url.toString() + "\n").encode("utf-8"))
+
+    def _process_finished(self, code, _status):
+        self._read_process()
+        if self._cancelled:
+            self._oauth_output = ""
+            return
+        authenticated = bool(inspect_pixiv_cache(self.cache_path).get("authenticated"))
+        self._oauth_output = ""
+        if int(code) == 0 and authenticated:
+            self.status.setText("✓ pixiv連携を保存しました。")
+            QMessageBox.information(self, "pixiv連携完了", "このアカウント専用のpixiv連携を保存しました。")
+            self.accept()
+        else:
+            self.status.setText("pixiv連携を完了できませんでした。もう一度お試しください。")
+            QMessageBox.warning(
+                self, "pixiv連携エラー",
+                "認証コードの有効時間が切れたか、pixivとの通信に失敗しました。画面を閉じて再試行してください。",
+            )
+
+    def _process_error(self, _error):
+        self.status.setText("pixiv認証用エンジンを起動できませんでした。")
+
+    def reject(self):
+        self._cancelled = True
+        if self.process.state() != QProcess.NotRunning:
+            self.process.kill()
+            self.process.waitForFinished(2000)
+        self._oauth_output = ""
+        super().reject()
 
 
 class AccountDialog(QDialog):
@@ -225,6 +369,7 @@ class AccountDialog(QDialog):
         self.auth_mode = QComboBox()
         self.auth_mode.addItem("認証なし", "none")
         self.auth_mode.addItem("アプリ内Xログイン（アカウント別・推奨）", "managed_x")
+        self.auth_mode.addItem("アプリ内pixiv連携（アカウント別・推奨）", "managed_pixiv")
         self.auth_mode.addItem("cookies.txt", "cookies_file")
         self.auth_mode.addItem("ブラウザCookie", "browser")
         self.auth_mode.addItem("pixiv refresh token", "pixiv_token")
@@ -240,24 +385,33 @@ class AccountDialog(QDialog):
         form.addRow("認証方式", self.auth_mode)
         form.addRow("認証値", row)
         layout.addLayout(form)
-        self.auth_actions = QHBoxLayout()
+        self.x_auth_actions = QHBoxLayout()
         self.login_button = QPushButton("Xへログイン / 更新")
         self.login_button.clicked.connect(self.open_x_login)
         self.import_button = QPushButton("cookies.txtを取り込む")
         self.import_button.clicked.connect(self.import_cookie)
         self.test_button = QPushButton("X認証をテスト")
         self.test_button.clicked.connect(self.test_x_auth)
-        self.auth_actions.addWidget(self.login_button)
-        self.auth_actions.addWidget(self.import_button)
-        self.auth_actions.addWidget(self.test_button)
-        self.auth_actions.addStretch()
-        layout.addLayout(self.auth_actions)
+        self.pixiv_login_button = QPushButton("pixivへログイン / 更新")
+        self.pixiv_login_button.clicked.connect(self.open_pixiv_login)
+        self.pixiv_test_button = QPushButton("pixiv認証をテスト")
+        self.pixiv_test_button.clicked.connect(self.test_pixiv_auth)
+        self.x_auth_actions.addWidget(self.login_button)
+        self.x_auth_actions.addWidget(self.import_button)
+        self.x_auth_actions.addWidget(self.test_button)
+        self.x_auth_actions.addStretch()
+        layout.addLayout(self.x_auth_actions)
+        self.pixiv_auth_actions = QHBoxLayout()
+        self.pixiv_auth_actions.addWidget(self.pixiv_login_button)
+        self.pixiv_auth_actions.addWidget(self.pixiv_test_button)
+        self.pixiv_auth_actions.addStretch()
+        layout.addLayout(self.pixiv_auth_actions)
         self.auth_status = QLabel("")
         self.auth_status.setObjectName("muted"); self.auth_status.setWordWrap(True)
         layout.addWidget(self.auth_status)
         note = QLabel(
-            "推奨方式はXアカウントごとにCookieとログイン領域を分離します。"
-            "従来のcookies.txt / ブラウザCookieも互換用に利用できます。"
+            "推奨方式はX・pixivともアカウントごとに認証とログイン領域を分離します。"
+            "従来のcookies.txt / ブラウザCookie / pixiv refresh tokenも互換用に利用できます。"
         )
         note.setObjectName("muted"); note.setWordWrap(True)
         layout.addWidget(note)
@@ -268,27 +422,57 @@ class AccountDialog(QDialog):
         if profile:
             self.platform.setCurrentIndex(max(0, self.platform.findData(profile.platform)))
             self.auth_mode.setCurrentIndex(max(0, self.auth_mode.findData(profile.auth_mode)))
-        self.platform.currentIndexChanged.connect(self._auth_mode_changed)
+        else:
+            self.auth_mode.setCurrentIndex(self.auth_mode.findData("managed_x"))
+        self.platform.currentIndexChanged.connect(self._platform_changed)
+        self._auth_mode_changed()
+
+    def _platform_changed(self):
+        platform = self.platform.currentData()
+        mode = self.auth_mode.currentData()
+        if platform == "x" and mode == "pixiv_token":
+            self.auth_mode.setCurrentIndex(self.auth_mode.findData("managed_x"))
+        elif platform == "x" and mode == "managed_pixiv":
+            self.auth_mode.setCurrentIndex(self.auth_mode.findData("managed_x"))
+        elif platform == "pixiv" and mode == "managed_x":
+            self.auth_mode.setCurrentIndex(self.auth_mode.findData("managed_pixiv"))
         self._auth_mode_changed()
 
     def _auth_mode_changed(self):
         mode = self.auth_mode.currentData()
         is_token = mode == "pixiv_token"
         is_managed = mode == "managed_x" and self.platform.currentData() == "x"
+        is_managed_pixiv = mode == "managed_pixiv" and self.platform.currentData() == "pixiv"
         if is_managed:
             self.auth_value.setText(str(managed_x_cookie_path(self.data_dir, self.profile_id)))
+        elif is_managed_pixiv:
+            self.auth_value.setText(str(managed_pixiv_cache_path(self.data_dir, self.profile_id)))
         self.auth_value.setEchoMode(QLineEdit.EchoMode.Password if is_token else QLineEdit.EchoMode.Normal)
-        self.auth_value.setReadOnly(is_managed)
+        self.auth_value.setReadOnly(is_managed or is_managed_pixiv)
         self.browse.setEnabled(mode == "cookies_file")
         self.login_button.setEnabled(is_managed)
         self.import_button.setEnabled(is_managed)
         self.test_button.setEnabled(is_managed and bool(self.engine))
-        if is_managed:
+        self.pixiv_login_button.setEnabled(is_managed_pixiv and bool(self.engine))
+        self.pixiv_test_button.setEnabled(is_managed_pixiv and bool(self.engine))
+        for button in (self.login_button, self.import_button, self.test_button):
+            button.setVisible(is_managed)
+        for button in (self.pixiv_login_button, self.pixiv_test_button):
+            button.setVisible(is_managed_pixiv)
+        if is_managed or is_managed_pixiv:
             self._refresh_managed_status()
         else:
             self.auth_status.setText("")
 
     def _refresh_managed_status(self):
+        if self.auth_mode.currentData() == "managed_pixiv":
+            path = managed_pixiv_cache_path(self.data_dir, self.profile_id)
+            info = inspect_pixiv_cache(path)
+            if info.get("authenticated"):
+                self.auth_status.setText(f"✓ アカウント専用pixiv連携を保存済み：{path}")
+            else:
+                self.auth_status.setText("未連携です。「pixivへログイン / 更新」を実行してください。")
+            return
         path = managed_x_cookie_path(self.data_dir, self.profile_id)
         info = inspect_netscape_cookie_file(path)
         if info.get("x_auth"):
@@ -304,6 +488,8 @@ class AccountDialog(QDialog):
             )
             dialog.exec()
             self._refresh_managed_status()
+            if dialog.result() == QDialog.Accepted:
+                self.test_x_auth()
         except Exception as exc:
             QMessageBox.warning(self, "アプリ内Xログイン", str(exc))
 
@@ -322,8 +508,25 @@ class AccountDialog(QDialog):
                 self, "Cookie取り込み完了",
                 f"このアカウント専用として{result['cookie_count']}件を保存しました。",
             )
+            self.test_x_auth()
         except Exception as exc:
             QMessageBox.warning(self, "Cookieを取り込めません", str(exc))
+
+    def open_pixiv_login(self):
+        try:
+            dialog = PixivLoginDialog(
+                self.data_dir,
+                self.profile_id,
+                managed_pixiv_cache_path(self.data_dir, self.profile_id),
+                self.engine,
+                self,
+            )
+            dialog.exec()
+            self._refresh_managed_status()
+            if dialog.result() == QDialog.Accepted:
+                self.test_pixiv_auth()
+        except Exception as exc:
+            QMessageBox.warning(self, "アプリ内pixivログイン", str(exc))
 
     def test_x_auth(self):
         path = managed_x_cookie_path(self.data_dir, self.profile_id)
@@ -337,6 +540,7 @@ class AccountDialog(QDialog):
             "--ignore-config", "--no-input", "--cookies", str(path),
             "--range", "1", "-N", "{tweet_id}", "https://x.com/i/bookmarks",
         ]
+        self._auth_test_kind = "x"
         self._auth_process = QProcess(self)
         self._auth_process.setProcessChannelMode(QProcess.MergedChannels)
         self._auth_process.finished.connect(self._auth_test_finished)
@@ -346,32 +550,57 @@ class AccountDialog(QDialog):
         self._auth_process.start(command[0], command[1:])
         QTimer.singleShot(60000, self._auth_test_timeout)
 
+    def test_pixiv_auth(self):
+        path = managed_pixiv_cache_path(self.data_dir, self.profile_id)
+        if not inspect_pixiv_cache(path).get("authenticated"):
+            QMessageBox.warning(self, "pixiv認証テスト", "先にpixivログインを実行してください。")
+            return
+        if self._auth_process and self._auth_process.state() != QProcess.NotRunning:
+            return
+        command = list(self.engine) + [
+            "--ignore-config", "--no-input", "--cache-file", str(path),
+            "-o", "refresh-token=cache", "--range", "1", "-N", "{id}",
+            "https://www.pixiv.net/bookmark.php",
+        ]
+        self._auth_test_kind = "pixiv"
+        self._auth_process = QProcess(self)
+        self._auth_process.setProcessChannelMode(QProcess.MergedChannels)
+        self._auth_process.finished.connect(self._auth_test_finished)
+        self._auth_process.errorOccurred.connect(self._auth_test_error)
+        self.pixiv_test_button.setEnabled(False)
+        self.auth_status.setText("pixiv認証を確認しています…")
+        self._auth_process.start(command[0], command[1:])
+        QTimer.singleShot(60000, self._auth_test_timeout)
+
     def _auth_test_finished(self, code, _status):
         if not self._auth_process:
             return
         output = bytes(self._auth_process.readAllStandardOutput()).decode("utf-8", "replace")
-        self.test_button.setEnabled(True)
-        if code == 0:
-            self.auth_status.setText("✓ X認証OK。このアカウントで取得できます。")
-            QMessageBox.information(self, "X認証テスト", "X認証に成功しました。")
+        kind = getattr(self, "_auth_test_kind", "x")
+        self.test_button.setEnabled(self.auth_mode.currentData() == "managed_x")
+        self.pixiv_test_button.setEnabled(self.auth_mode.currentData() == "managed_pixiv")
+        ok, reason = (classify_pixiv_auth_test(int(code), output)
+                      if kind == "pixiv" else classify_x_auth_test(int(code), output))
+        if ok:
+            self.auth_status.setText(f"✓ {reason}")
+            QMessageBox.information(self, "認証テスト", reason)
         else:
-            reason = "XがCookieを拒否しました。ログインを更新してください。"
-            if "rate" in output.lower() and "limit" in output.lower():
-                reason = "Xのアクセス制限中です。時間を置いて再確認してください。"
-            self.auth_status.setText("✗ X認証に失敗しました。")
-            QMessageBox.warning(self, "X認証テスト", reason)
+            self.auth_status.setText(f"✗ {reason}")
+            QMessageBox.warning(self, "認証テスト", reason)
 
     def _auth_test_error(self, _error):
-        if self.test_button.isEnabled():
+        if _error != QProcess.FailedToStart:
             return
-        self.test_button.setEnabled(True)
+        self.test_button.setEnabled(self.auth_mode.currentData() == "managed_x")
+        self.pixiv_test_button.setEnabled(self.auth_mode.currentData() == "managed_pixiv")
         self.auth_status.setText("認証テスト用エンジンを起動できませんでした。")
 
     def _auth_test_timeout(self):
         if self._auth_process and self._auth_process.state() != QProcess.NotRunning:
             self._auth_process.kill()
-            self.test_button.setEnabled(True)
-            self.auth_status.setText("X認証テストがタイムアウトしました。")
+            self.test_button.setEnabled(self.auth_mode.currentData() == "managed_x")
+            self.pixiv_test_button.setEnabled(self.auth_mode.currentData() == "managed_pixiv")
+            self.auth_status.setText("認証テストがタイムアウトしました。")
 
     def pick_cookie(self):
         path, _ = QFileDialog.getOpenFileName(self, "cookies.txt を選択", "", "Cookie file (*.txt);;All files (*.*)")
@@ -379,11 +608,42 @@ class AccountDialog(QDialog):
             self.auth_value.setText(path)
             self.auth_mode.setCurrentIndex(self.auth_mode.findData("cookies_file"))
 
+    def accept(self):
+        platform = self.platform.currentData()
+        mode = self.auth_mode.currentData()
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "表示名が必要です", "この認証を見分ける表示名を入力してください。")
+            return
+        if ((platform == "x" and mode in {"pixiv_token", "managed_pixiv"}) or
+                (platform == "pixiv" and mode == "managed_x")):
+            QMessageBox.warning(self, "認証方式を確認", "サービスに対応した認証方式を選択してください。")
+            return
+        if platform == "x" and mode == "managed_x":
+            info = inspect_netscape_cookie_file(managed_x_cookie_path(self.data_dir, self.profile_id))
+            if not info.get("x_auth"):
+                QMessageBox.warning(
+                    self,
+                    "Xログインが必要です",
+                    "「Xへログイン / 更新」またはcookies.txtの取り込みを完了してから保存してください。",
+                )
+                return
+        if platform == "pixiv" and mode == "managed_pixiv":
+            if not inspect_pixiv_cache(managed_pixiv_cache_path(self.data_dir, self.profile_id)).get("authenticated"):
+                QMessageBox.warning(
+                    self,
+                    "pixivログインが必要です",
+                    "「pixivへログイン / 更新」を完了してから保存してください。",
+                )
+                return
+        super().accept()
+
     def result_profile(self) -> AccountProfile:
         mode = self.auth_mode.currentData()
         value = self.auth_value.text().strip()
         if mode == "managed_x":
             value = str(managed_x_cookie_path(self.data_dir, self.profile_id))
+        elif mode == "managed_pixiv":
+            value = str(managed_pixiv_cache_path(self.data_dir, self.profile_id))
         return AccountProfile(
             profile_id=self.profile_id,
             name=self.name_edit.text().strip() or "未設定",
@@ -904,7 +1164,7 @@ class MainWindow(QMainWindow):
         header = QFrame(); header.setFixedHeight(66)
         hl = QHBoxLayout(header); hl.setContentsMargins(18, 8, 18, 8)
         titles = QVBoxLayout(); t = QLabel(APP_NAME); t.setObjectName("title")
-        sub = QLabel("X / Twitter & pixiv メディア収集クライアント — test build"); sub.setObjectName("muted")
+        sub = QLabel(f"X / Twitter & pixiv メディア収集クライアント — v{APP_VERSION}"); sub.setObjectName("muted")
         titles.addWidget(t); titles.addWidget(sub); hl.addLayout(titles); hl.addStretch()
         self.engine_badge = QLabel("gallery-dl: 確認中…"); self.engine_badge.setObjectName("muted")
         hl.addWidget(self.engine_badge)
@@ -937,11 +1197,14 @@ class MainWindow(QMainWindow):
         top.addWidget(sec); top.addStretch(); top.addWidget(add); l.addLayout(top)
         self.account_list = QListWidget(); self.account_list.currentRowChanged.connect(self.account_selected)
         l.addWidget(self.account_list, 1)
+        quick_login = QPushButton("Xログイン / Cookie更新")
+        quick_login.clicked.connect(self.quick_x_login)
         edit = QPushButton("選択アカウントを編集"); edit.clicked.connect(self.edit_account)
         delete = QPushButton("選択アカウントを削除"); delete.clicked.connect(self.delete_account)
-        l.addWidget(edit); l.addWidget(delete)
+        l.addWidget(quick_login); l.addWidget(edit); l.addWidget(delete)
         l.addSpacing(10)
         oauth = QPushButton("pixiv OAuth を開始"); oauth.clicked.connect(self.start_pixiv_oauth)
+        oauth.setText("pixivログイン / 連携更新")
         l.addWidget(oauth)
         open_data = QPushButton("データフォルダを開く"); open_data.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir))))
         l.addWidget(open_data)
@@ -1222,6 +1485,11 @@ class MainWindow(QMainWindow):
                     if account.auth_value != expected:
                         account.auth_value = expected
                         changed = True
+                elif account.auth_mode == "managed_pixiv":
+                    expected = str(managed_pixiv_cache_path(self.data_dir, account.profile_id))
+                    if account.auth_value != expected:
+                        account.auth_value = expected
+                        changed = True
             if changed or any(not x.get("profile_id") for x in data):
                 try:
                     atomic_write_json(self.accounts_file, [asdict(a) for a in profiles])
@@ -1244,8 +1512,24 @@ class MainWindow(QMainWindow):
             self.account_list.clear(); self.account_combo.clear()
             for i, a in enumerate(self.accounts):
                 prefix = "𝕏" if a.platform == "x" else "P"
-                self.account_list.addItem(f"{prefix}  {a.name}")
-                self.account_combo.addItem(f"{prefix}  {a.name}", i)
+                auth_mark = ""
+                auth_hint = ""
+                if a.platform == "x" and a.auth_mode == "managed_x":
+                    ready = bool(inspect_netscape_cookie_file(Path(a.auth_value)).get("x_auth"))
+                    auth_mark = "✓" if ready else "⚠"
+                    auth_hint = "アカウント専用Cookie保存済み" if ready else "Xログインが必要"
+                elif a.platform == "pixiv" and a.auth_mode == "managed_pixiv":
+                    ready = bool(inspect_pixiv_cache(Path(a.auth_value)).get("authenticated"))
+                    auth_mark = "✓" if ready else "⚠"
+                    auth_hint = "アカウント専用pixiv連携保存済み" if ready else "pixivログインが必要"
+                label = "  ".join(x for x in (prefix, auth_mark, a.name) if x)
+                item = QListWidgetItem(label)
+                if auth_hint:
+                    item.setToolTip(auth_hint)
+                self.account_list.addItem(item)
+                self.account_combo.addItem(label, i)
+                if auth_hint:
+                    self.account_combo.setItemData(i, auth_hint, Qt.ToolTipRole)
                 self.account_combo.setItemData(i, a.profile_id, Qt.UserRole + 1)
             self.account_combo.addItem("認証なし", -1)
             self.account_combo.setItemData(len(self.accounts), "", Qt.UserRole + 1)
@@ -1262,6 +1546,40 @@ class MainWindow(QMainWindow):
         d = AccountDialog(self, data_dir=self.data_dir, engine=self.engine_command())
         if d.exec():
             self.accounts.append(d.result_profile()); self.save_accounts(); self.refresh_accounts(self.accounts[-1].profile_id)
+
+    def quick_x_login(self):
+        idx = self.account_list.currentRow()
+        if idx < 0 or idx >= len(self.accounts):
+            QMessageBox.information(self, "Xログイン", "先にXアカウントを選択してください。")
+            return
+        account = self.accounts[idx]
+        if account.platform != "x":
+            QMessageBox.information(self, "Xログイン", "選択中のアカウントはXではありません。")
+            return
+        if account.auth_mode != "managed_x":
+            QMessageBox.information(
+                self,
+                "Xログイン",
+                "このアカウントは従来方式です。「選択アカウントを編集」で、"
+                "認証方式を「アプリ内Xログイン」へ変更してください。",
+            )
+            return
+        try:
+            dialog = XLoginDialog(
+                self.data_dir,
+                account.profile_id,
+                managed_x_cookie_path(self.data_dir, account.profile_id),
+                self,
+            )
+            if dialog.exec() == QDialog.Accepted:
+                self.refresh_accounts(account.profile_id)
+                QMessageBox.information(
+                    self,
+                    "Xログイン更新完了",
+                    "このアカウント専用Cookieを更新しました。設定し直さず、そのまま取得できます。",
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "アプリ内Xログイン", str(exc))
 
     def edit_account(self):
         idx = self.account_list.currentRow()
@@ -1505,14 +1823,19 @@ class MainWindow(QMainWindow):
         return "認証なし", "none", ""
 
     def ensure_auth_ready(self, auth_mode: str, auth_value: str):
-        if auth_mode != "managed_x":
-            return
-        info = inspect_netscape_cookie_file(Path(auth_value))
-        if not info.get("x_auth"):
-            raise ValueError(
-                "このXアカウントは未ログインです。左側の『選択アカウントを編集』から、"
-                "『Xへログイン / 更新』またはcookies.txtの取り込みを実行してください。"
-            )
+        if auth_mode == "managed_x":
+            info = inspect_netscape_cookie_file(Path(auth_value))
+            if not info.get("x_auth"):
+                raise ValueError(
+                    "このXアカウントは未ログインです。左側の『Xログイン / Cookie更新』から"
+                    "ログインしてください。"
+                )
+        elif auth_mode == "managed_pixiv":
+            if not inspect_pixiv_cache(Path(auth_value)).get("authenticated"):
+                raise ValueError(
+                    "このpixivアカウントは未連携です。左側の『pixivログイン / 連携更新』から"
+                    "ログインしてください。"
+                )
 
     def selected_extensions(self) -> list[str]:
         extensions: list[str] = []
@@ -2063,17 +2386,39 @@ class MainWindow(QMainWindow):
         if self.active_job: self.active_job.stop()
 
     def start_pixiv_oauth(self):
-        if not self.engine_available():
-            QMessageBox.warning(self, "gallery-dl がありません", "先に setup_and_run.cmd で依存関係を入れてください。")
+        idx = self.account_list.currentRow()
+        if idx < 0 or idx >= len(self.accounts):
+            QMessageBox.information(self, "pixivログイン", "先にpixivアカウントを選択してください。")
             return
-        # OAuth needs interactive terminal/browser handling. Launch a visible console on Windows.
-        if sys.platform.startswith("win"):
-            import subprocess
-            engine = self.engine_command()
-            subprocess.Popen(["cmd", "/k"] + engine + ["oauth:pixiv"], cwd=str(self.data_dir))
-            self.log.append("[OAUTH] pixiv OAuth用コンソールを開きました。表示される案内に従ってください。")
-        else:
-            QMessageBox.information(self, "pixiv OAuth", "Windowsテスト版では別コンソールでOAuthを開始します。\nこの環境ではターミナルから `python -m gallery_dl oauth:pixiv` を実行してください。")
+        account = self.accounts[idx]
+        if account.platform != "pixiv":
+            QMessageBox.information(self, "pixivログイン", "選択中のアカウントはpixivではありません。")
+            return
+        if account.auth_mode != "managed_pixiv":
+            QMessageBox.information(
+                self,
+                "pixivログイン",
+                "このアカウントは従来方式です。「選択アカウントを編集」で、"
+                "認証方式を「アプリ内pixiv連携」へ変更してください。",
+            )
+            return
+        try:
+            dialog = PixivLoginDialog(
+                self.data_dir,
+                account.profile_id,
+                managed_pixiv_cache_path(self.data_dir, account.profile_id),
+                self.engine_command(),
+                self,
+            )
+            if dialog.exec() == QDialog.Accepted:
+                self.refresh_accounts(account.profile_id)
+                QMessageBox.information(
+                    self,
+                    "pixiv連携更新完了",
+                    "このアカウント専用のpixiv連携を更新しました。そのまま取得できます。",
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "アプリ内pixivログイン", str(exc))
 
     def engine_available(self) -> bool:
         if getattr(sys, "frozen", False):
