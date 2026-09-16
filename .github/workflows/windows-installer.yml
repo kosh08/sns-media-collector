@@ -1,0 +1,49 @@
+name: Windows installer
+'on':
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Locate Inno Setup
+        shell: pwsh
+        run: |
+          $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (!(Test-Path $compiler)) { throw 'Inno Setup 6 was not found on this runner.' }
+          "ISCC_PATH=$compiler" >> $env:GITHUB_ENV
+      - name: Build, install, upgrade and verify
+        run: python build_release.py
+      - name: Keep verified installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: SNSMediaCollector-Windows-Setup
+          path: |
+            release-output/SNSMediaCollector-Setup-*.exe
+            release-output/SHA256SUMS.txt
+            release-output/release-check.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Keep test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-test-reports
+          path: |
+            release-output/*.json
+            release-output/*.log
+          if-no-files-found: ignore
+          retention-days: 14

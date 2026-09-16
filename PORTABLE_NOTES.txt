@@ -1,0 +1,14 @@
+SNS Media Collector v0.2.3-portable-test
+
+Run build_portable.cmd on Windows with Python 3.10 or newer.
+The builder runs the tests and creates a new folder under portable_build.
+Existing portable builds are kept. Explorer opens the successful output.
+Run SNSMediaCollector.exe inside the SNSMediaCollector folder.
+Keep the whole folder, including _internal and bin, together.
+Settings/data remain in %USERPROFILE%/SNSMediaCollector by default.
+This ZIP contains source and a builder, not a prebuilt Windows executable.
+Automatic application updates are not implemented.
+Windows frozen executable execution has not been validated in the Linux build environment.
+
+After packaging, the actual app runs an isolated offline self-test.
+BUILD COMPLETE requires that test to pass. Results: portable_self_test.json.

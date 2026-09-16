@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+portable_build/
+release-output/
+*.spec
+crash.log
+accounts.json
+targets.json
+*.sqlite3*
+*cookies*.txt
