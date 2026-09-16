@@ -7,13 +7,14 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QPixmap
 
 from core import (
@@ -32,9 +33,45 @@ from PySide6.QtWidgets import (
     QRadioButton, QScrollArea, QSpinBox, QSplitter, QStackedWidget,
     QTextEdit, QToolButton, QVBoxLayout, QWidget
 )
+from updater_core import download_update, fetch_latest_update
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
+
+
+class UpdateCheckWorker(QThread):
+    found = Signal(dict)
+    current = Signal()
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            info = fetch_latest_update(APP_VERSION)
+            self.found.emit(info) if info else self.current.emit()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class UpdateDownloadWorker(QThread):
+    progress_changed = Signal(int)
+    ready = Signal(str, str)
+    failed = Signal(str)
+
+    def __init__(self, info: dict, parent=None):
+        super().__init__(parent)
+        self.info = dict(info)
+
+    def run(self):
+        try:
+            folder = Path(tempfile.gettempdir()) / "SNSMediaCollector" / "updates" / self.info["version"]
+            path = download_update(
+                self.info,
+                folder / self.info["name"],
+                self.progress_changed.emit,
+            )
+            self.ready.emit(str(path), self.info["version"])
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 DARK_QSS = r"""
@@ -580,6 +617,9 @@ class MainWindow(QMainWindow):
         self.jobs: list[DownloadJob] = []
         self.active_job: Optional[DownloadJob] = None
         self.last_saved_path: Optional[Path] = None
+        self.update_check_worker: Optional[UpdateCheckWorker] = None
+        self.update_download_worker: Optional[UpdateDownloadWorker] = None
+        self._update_check_silent = False
 
         self.build_ui()
         self.refresh_accounts()
@@ -592,6 +632,8 @@ class MainWindow(QMainWindow):
         self._session_timer.timeout.connect(self.save_session)
         for widget in (self.url_edit, self.dest_edit, self.date_after_edit):
             widget.textChanged.connect(lambda *_: self._session_timer.start())
+        if getattr(sys, "frozen", False) and not test_data_dir:
+            QTimer.singleShot(3000, lambda: self.check_for_updates(silent=True))
         for widget in (self.account_combo, self.platform_combo):
             widget.currentIndexChanged.connect(lambda *_: self._session_timer.start())
         for group in (self.target_group, self.range_group):
@@ -666,6 +708,9 @@ class MainWindow(QMainWindow):
         fl = QHBoxLayout(footer); fl.setContentsMargins(16, 4, 16, 4)
         self.footer_status = QLabel("準備完了"); self.footer_status.setObjectName("muted")
         fl.addWidget(self.footer_status); fl.addStretch()
+        self.update_button = QPushButton("更新を確認")
+        self.update_button.clicked.connect(lambda: self.check_for_updates(silent=False))
+        fl.addWidget(self.update_button)
         self.data_label = QLabel(str(self.data_dir)); self.data_label.setObjectName("muted")
         fl.addWidget(self.data_label)
         layout.addWidget(footer)
@@ -1804,6 +1849,83 @@ class MainWindow(QMainWindow):
         else:
             self.engine_badge.setText("gallery-dl: 未インストール")
             self.engine_badge.setStyleSheet("color:#f6ad55;")
+
+    def check_for_updates(self, silent: bool = False):
+        if self.update_check_worker and self.update_check_worker.isRunning():
+            if not silent:
+                self.footer_status.setText("更新を確認中です…")
+            return
+        self._update_check_silent = bool(silent)
+        self.update_button.setEnabled(False)
+        self.update_button.setText("確認中…")
+        worker = UpdateCheckWorker(self)
+        self.update_check_worker = worker
+        worker.found.connect(self._update_found)
+        worker.current.connect(self._update_current)
+        worker.failed.connect(self._update_check_failed)
+        worker.finished.connect(self._update_check_finished)
+        worker.start()
+
+    def _update_check_finished(self):
+        self.update_button.setEnabled(True)
+        self.update_button.setText("更新を確認")
+
+    def _update_current(self):
+        if not self._update_check_silent:
+            QMessageBox.information(self, "更新確認", f"最新版です（v{APP_VERSION}）。")
+
+    def _update_check_failed(self, message: str):
+        if not self._update_check_silent:
+            QMessageBox.warning(self, "更新確認", f"更新情報を取得できませんでした。\n\n{message}")
+
+    def _update_found(self, info: dict):
+        notes = str(info.get("notes") or "").strip()
+        detail = f"\n\n{notes[:600]}" if notes else ""
+        answer = QMessageBox.question(
+            self,
+            "アップデートがあります",
+            f"SNS Media Collector v{info['version']} を利用できます。\n"
+            f"ダウンロードして自動更新しますか？{detail}",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        if self.active_job:
+            QMessageBox.information(self, "更新待ち", "ダウンロード処理が終わってから、もう一度更新を実行してください。")
+            return
+        self.update_button.setEnabled(False)
+        self.update_button.setText("取得 0%")
+        worker = UpdateDownloadWorker(info, self)
+        self.update_download_worker = worker
+        worker.progress_changed.connect(lambda value: self.update_button.setText(f"取得 {value}%"))
+        worker.ready.connect(self._update_ready)
+        worker.failed.connect(self._update_download_failed)
+        worker.finished.connect(lambda: self.update_button.setEnabled(True))
+        worker.start()
+
+    def _update_download_failed(self, message: str):
+        self.update_button.setText("更新を確認")
+        QMessageBox.warning(self, "更新失敗", f"更新ファイルを取得できませんでした。\n\n{message}")
+
+    def _update_ready(self, installer_text: str, version: str):
+        installer = Path(installer_text)
+        current_dir = Path(sys.executable).resolve().parent
+        helper = current_dir / "bin" / "SNSMediaCollectorUpdater.exe"
+        target = current_dir.parent / version / "SNSMediaCollector.exe"
+        if not helper.is_file():
+            self.update_button.setText("更新を確認")
+            QMessageBox.warning(self, "更新準備", "自動更新プログラムが見つかりません。セットアップを手動で実行します。")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(installer)))
+            return
+        result = QProcess.startDetached(
+            str(helper), [str(os.getpid()), str(installer), str(target)]
+        )
+        started = result[0] if isinstance(result, tuple) else bool(result)
+        if not started:
+            self.update_button.setText("更新を確認")
+            QMessageBox.warning(self, "更新失敗", "自動更新プログラムを起動できませんでした。")
+            return
+        self.footer_status.setText(f"v{version}へ更新中… アプリを再起動します")
+        QApplication.instance().quit()
 
     def closeEvent(self, event):
         self._closing = True

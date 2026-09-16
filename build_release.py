@@ -33,6 +33,13 @@ def self_test(executable: Path, report: Path):
         raise RuntimeError(f'Packaged self-test failed: {report}')
 
 
+def helper_self_test(executable: Path, report: Path):
+    report.unlink(missing_ok=True)
+    checked([executable, '--self-test', report])
+    if json.loads(report.read_text(encoding='utf-8')).get('success') is not True:
+        raise RuntimeError(f'Updater self-test failed: {report}')
+
+
 def compile_setup(compiler: Path, bundle: Path, output: Path, version: str) -> Path:
     version = release_version(version)
     checked([compiler, f'/DAppVersion={version}', f'/DBundleDir={bundle}',
@@ -96,9 +103,16 @@ def main() -> int:
                  '--console', '--name', 'gallery-dl', '--collect-all', 'gallery_dl',
                  '--distpath', work / 'engine', '--workpath', work / 'engine-work',
                  '--specpath', work, ROOT / 'gallery_dl_launcher.py'], cwd=ROOT)
+        checked([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
+                 '--windowed', '--name', 'SNSMediaCollectorUpdater',
+                 '--distpath', work / 'updater', '--workpath', work / 'updater-work',
+                 '--specpath', work, ROOT / 'update_helper.py'], cwd=ROOT)
         bundle = dist / 'SNSMediaCollector'
         (bundle / 'bin').mkdir()
         shutil.copy2(work / 'engine' / 'gallery-dl.exe', bundle / 'bin' / 'gallery-dl.exe')
+        updater = work / 'updater' / 'SNSMediaCollectorUpdater.exe'
+        shutil.copy2(updater, bundle / 'bin' / updater.name)
+        helper_self_test(bundle / 'bin' / updater.name, output / 'updater-self-test.json')
         self_test(bundle / 'SNSMediaCollector.exe', output / 'bundle-self-test.json')
         compiler = Path(os.environ.get('ISCC_PATH', r'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'))
         if not compiler.is_file():
@@ -109,7 +123,7 @@ def main() -> int:
         (output / 'SHA256SUMS.txt').write_text(f'{digest}  {setup.name}\n', encoding='ascii')
         (output / 'release-check.json').write_text(json.dumps(dict(
             success=True, version=version, setup=setup.name, sha256=digest,
-            checks=['frozen app', 'install', 'upgrade', 'reinstall', 'installed app',
+            checks=['frozen app', 'updater helper', 'install', 'upgrade', 'reinstall', 'installed app',
                     'uninstall preserves user data']), indent=2), encoding='utf-8')
     return 0
 

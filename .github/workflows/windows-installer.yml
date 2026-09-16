@@ -4,7 +4,7 @@ name: Windows installer
   push:
     branches: [main]
 permissions:
-  contents: read
+  contents: write
 env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
@@ -40,6 +40,24 @@ jobs:
             release-output/release-check.json
           if-no-files-found: error
           retention-days: 30
+      - name: Publish automatic-update release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content RELEASE_VERSION.txt -Raw).Trim()
+          $tag = "v$version"
+          $setup = "release-output/SNSMediaCollector-Setup-$version.exe"
+          $files = @($setup, 'release-output/SHA256SUMS.txt', 'release-output/release-check.json')
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @files --clobber --repo $env:GITHUB_REPOSITORY
+            gh release edit $tag --latest --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $tag @files --latest --repo $env:GITHUB_REPOSITORY `
+              --title "SNS Media Collector $version" `
+              --notes "Windows自動更新対応版。アプリ内の「更新を確認」から取得できます。"
+          }
       - name: Keep test reports
         if: always()
         uses: actions/upload-artifact@v4
