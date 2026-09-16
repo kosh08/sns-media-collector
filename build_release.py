@@ -98,6 +98,8 @@ def main() -> int:
         checked([sys.executable, ROOT / 'full_test.py'], cwd=ROOT)
         checked([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir',
                  '--windowed', '--name', 'SNSMediaCollector', '--distpath', dist,
+                 '--hidden-import', 'PySide6.QtWebEngineCore',
+                 '--hidden-import', 'PySide6.QtWebEngineWidgets',
                  '--workpath', work / 'app', '--specpath', work, ROOT / 'launcher.py'], cwd=ROOT)
         checked([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
                  '--console', '--name', 'gallery-dl', '--collect-all', 'gallery_dl',

@@ -34,6 +34,11 @@ class ReleaseTests(unittest.TestCase):
 
     def test_windows_builder_refuses_non_windows(self):
         with patch('build_release.sys.platform', 'linux'):
-            with self.assertRaisesRegex(RuntimeError, 'Windows is required'): build_release.main()
+                with self.assertRaisesRegex(RuntimeError, 'Windows is required'): build_release.main()
+
+    def test_release_bundle_includes_x_login_web_engine(self):
+        source=(build_release.ROOT / 'build_release.py').read_text(encoding='utf-8')
+        self.assertIn('PySide6.QtWebEngineCore', source)
+        self.assertIn('PySide6.QtWebEngineWidgets', source)
 
 if __name__ == '__main__': unittest.main()

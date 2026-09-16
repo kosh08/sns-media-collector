@@ -19,7 +19,9 @@ def main() -> int:
         ast.parse(source, filename=str(path), feature_version=(3, 10))
     print("Python 3.10 syntax compatibility: OK")
 
-    suite = unittest.defaultTestLoader.loadTestsFromNames(["test_core", "test_release", "test_updater"])
+    suite = unittest.defaultTestLoader.loadTestsFromNames(
+        ["test_core", "test_auth_store", "test_release", "test_updater"]
+    )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
         return 11

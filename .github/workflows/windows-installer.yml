@@ -56,7 +56,7 @@ jobs:
           } else {
             gh release create $tag @files --latest --repo $env:GITHUB_REPOSITORY `
               --title "SNS Media Collector $version" `
-              --notes "Windows自動更新対応版。アプリ内の「更新を確認」から取得できます。"
+              --notes "Xアカウント別ログイン対応版。アプリ内の「更新を確認」から取得できます。"
           }
       - name: Keep test reports
         if: always()

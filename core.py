@@ -676,7 +676,7 @@ def import_x_likes_seen_archive(
 
 
 def _append_auth(cmd: list[str], platform: str, auth_mode: str, auth_value: str) -> None:
-    if auth_mode == "cookies_file" and auth_value:
+    if auth_mode in {"cookies_file", "managed_x"} and auth_value:
         cmd += ["--cookies", auth_value]
     elif auth_mode == "browser" and auth_value:
         cmd += ["--cookies-from-browser", auth_value]
@@ -780,7 +780,7 @@ def build_command(
         str(destination),
     ]
 
-    if auth_mode == "cookies_file" and auth_value:
+    if auth_mode in {"cookies_file", "managed_x"} and auth_value:
         cmd += ["--cookies", auth_value]
     elif auth_mode == "browser" and auth_value:
         cmd += ["--cookies-from-browser", auth_value]

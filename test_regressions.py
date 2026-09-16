@@ -221,6 +221,25 @@ class Regressions(unittest.TestCase):
         self.assertEqual(stored[1]['profile_id'], selected)
         self.assertEqual(stored[0]['auth_value'], 'local-cookies.txt')
 
+    def test_managed_x_account_uses_private_data_path_and_survives_restart(self):
+        from app import AccountDialog, AccountProfile
+        profile = AccountProfile('managed', 'x', 'managed_x', 'obsolete-path.txt')
+        dialog = AccountDialog(self.w, profile, data_dir=self.root, engine=[sys.executable])
+        result = dialog.result_profile()
+        expected = self.root / 'auth' / 'cookies' / f'x-{profile.profile_id}.txt'
+        self.assertEqual(result.auth_mode, 'managed_x')
+        self.assertEqual(Path(result.auth_value), expected)
+        self.assertIn('未ログイン', dialog.auth_status.text())
+        dialog.close()
+        self.w.accounts = [result]
+        self.w.save_accounts()
+        self.w.close(); self.w = MainWindow(); self.w.start_next_job = lambda: None
+        self.assertEqual(Path(self.w.accounts[0].auth_value), expected)
+
+    def test_managed_x_missing_cookie_is_blocked_before_gallery_dl(self):
+        with self.assertRaisesRegex(ValueError, '未ログイン'):
+            self.w.ensure_auth_ready('managed_x', str(self.root / 'missing.txt'))
+
     def test_deleted_saved_account_does_not_select_another_login(self):
         from app import AccountProfile
         self.w.accounts = [AccountProfile('one', 'x'), AccountProfile('two', 'x')]

@@ -54,6 +54,11 @@ def run(output: str) -> int:
                 assert result.returncode == 0, result.stderr
                 assert 'twitter' in result.stdout and 'pixiv' in result.stdout, result.stdout[-1000:]
                 report['checks'].append('bundled engine and X/pixiv extractor modules')
+                # Importing these from the frozen build proves that the isolated
+                # per-account X login window and its QtWebEngine runtime shipped.
+                from PySide6.QtWebEngineCore import QWebEngineProfile  # noqa: F401
+                from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+                report['checks'].append('bundled per-account X login web engine')
                 application.processEvents()
                 report['success'] = True
             finally:
