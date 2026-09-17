@@ -12,7 +12,7 @@ from unittest.mock import patch
 import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QUrl
 from PySide6.QtWidgets import QApplication
-from app import MainWindow, DownloadJob, pixiv_callback_code, sanitized_pixiv_oauth_diagnostic
+from app import MainWindow, DownloadJob, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 APP = QApplication.instance() or QApplication([])
 OLD = LikeSeenRecord('2086000000000000000', 1)
@@ -372,6 +372,14 @@ class Regressions(unittest.TestCase):
         self.assertIn('invalid_grant', text)
         self.assertNotIn('SECRET', text)
         self.assertNotIn('TOKENVALUE', text)
+
+    def test_frozen_pixiv_oauth_uses_private_pipe_input_mode(self):
+        cache = self.root / 'pixiv.sqlite3'
+        frozen = pixiv_oauth_command([r'C:\Program Files\SNSMediaCollector\gallery-dl.exe'], cache)
+        source = pixiv_oauth_command([sys.executable, '-m', 'gallery_dl'], cache)
+        self.assertIn('--smc-pixiv-stdin', frozen)
+        self.assertNotIn('--smc-pixiv-stdin', source)
+        self.assertEqual(frozen[-1], 'oauth:pixiv')
 
     def test_pixiv_login_dialog_captures_callback_and_uses_isolated_cache(self):
         try:

@@ -44,7 +44,7 @@ def helper_self_test(executable: Path, report: Path):
 def pixiv_oauth_wait_self_test(executable: Path):
     """Ensure the frozen gallery-dl sidecar keeps stdin open for pixiv OAuth."""
     process = subprocess.Popen(
-        [str(executable), '--ignore-config', '--no-colors',
+        [str(executable), '--smc-pixiv-stdin', '--ignore-config', '--no-colors',
          '-o', 'browser=false', 'oauth:pixiv'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding='utf-8', errors='replace',

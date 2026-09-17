@@ -276,6 +276,19 @@ def sanitized_pixiv_oauth_diagnostic(output: str, returncode: int) -> str:
     return f"終了コード {int(returncode)}" + (f"：{detail[:700]}" if detail else "")
 
 
+def pixiv_oauth_command(engine: list[str], cache_path: Path) -> list[str]:
+    """Build the OAuth command, enabling pipe input for our frozen sidecar."""
+    command = list(engine)
+    executable_name = Path(str(command[0]).replace("\\", "/")).name.lower() if command else ""
+    if executable_name == "gallery-dl.exe":
+        command.append("--smc-pixiv-stdin")
+    command.extend([
+        "--ignore-config", "--no-colors", "--cache-file", str(cache_path),
+        "-o", "browser=false", "oauth:pixiv",
+    ])
+    return command
+
+
 class PixivLoginDialog(QDialog):
     """Run gallery-dl's PKCE flow in an isolated embedded browser."""
     def __init__(self, data_dir: Path, profile_id: str, cache_path: Path,
@@ -338,10 +351,7 @@ class PixivLoginDialog(QDialog):
         self.process.finished.connect(self._process_finished)
         self.process.errorOccurred.connect(self._process_error)
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        command = self.engine + [
-            "--ignore-config", "--no-colors", "--cache-file", str(self.cache_path),
-            "-o", "browser=false", "oauth:pixiv",
-        ]
+        command = pixiv_oauth_command(self.engine, self.cache_path)
         self.process.start(command[0], command[1:])
 
     def _read_process(self):
