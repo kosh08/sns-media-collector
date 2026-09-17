@@ -233,6 +233,52 @@ class Regressions(unittest.TestCase):
         self.assertEqual(self.w.url_edit.text(), '@second_target')
         self.assertEqual(self.w.dest_edit.text(), str(self.root / 'second images'))
 
+    def test_sidebar_cross_platform_switch_preserves_outgoing_workspace(self):
+        from app import AccountProfile
+        x_account = AccountProfile('x-account', 'x')
+        pixiv_account = AccountProfile('pixiv-account', 'pixiv')
+        self.w.accounts = [x_account, pixiv_account]
+        self.w.save_accounts(); self.w.refresh_accounts(x_account.profile_id)
+        self.w.url_edit.setText('@x_target')
+        self.w.dest_edit.setText(str(self.root / 'x images'))
+
+        self.w.account_list.setCurrentRow(1)
+        self.assertEqual(self.w.platform_combo.currentData(), 'pixiv')
+        self.assertFalse(self.w.platform_combo.isEnabled())
+        self.assertEqual(self.w.url_edit.text(), '')
+        self.w.url_edit.setText('123456')
+        self.w.dest_edit.setText(str(self.root / 'pixiv images'))
+
+        self.w.account_list.setCurrentRow(0)
+        self.assertEqual(self.w.platform_combo.currentData(), 'x')
+        self.assertEqual(self.w.url_edit.text(), '@x_target')
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'x images'))
+        self.w.account_list.setCurrentRow(1)
+        self.assertEqual(self.w.url_edit.text(), '123456')
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'pixiv images'))
+
+    def test_same_target_can_keep_a_different_destination_per_account(self):
+        from app import AccountProfile
+        first = AccountProfile('first', 'x')
+        second = AccountProfile('second', 'x')
+        self.w.accounts = [first, second]
+        self.w.save_accounts(); self.w.refresh_accounts(first.profile_id)
+        self.w.url_edit.setText('@shared_target')
+        self.w.dest_edit.setText(str(self.root / 'first destination'))
+        self.w.account_combo.setCurrentIndex(self.w.account_combo.findData(1))
+        self.w.url_edit.setText('@shared_target')
+        self.w.dest_edit.setText(str(self.root / 'second destination'))
+
+        self.w.account_combo.setCurrentIndex(self.w.account_combo.findData(0))
+        self.assertEqual(self.w.url_edit.text(), '@shared_target')
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'first destination'))
+        self.w.account_combo.setCurrentIndex(self.w.account_combo.findData(1))
+        self.assertEqual(self.w.url_edit.text(), '@shared_target')
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'second destination'))
+
+        self.w.account_combo.setCurrentIndex(self.w.account_combo.findData(-1))
+        self.assertTrue(self.w.platform_combo.isEnabled())
+
     def test_legacy_accounts_migrate_and_refresh_preserves_selection(self):
         self.w.close()
         (self.root / 'accounts.json').write_text(json.dumps([

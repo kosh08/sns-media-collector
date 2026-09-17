@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.6"
+APP_VERSION = "0.3.7"
 
 
 class UpdateCheckWorker(QThread):
@@ -1158,6 +1158,7 @@ class MainWindow(QMainWindow):
     def account_workspace_state(self) -> dict:
         checked_range = self.range_group.checkedButton()
         return dict(
+            platform=self.platform_combo.currentData(),
             target=self.url_edit.text(), target_type=self.selected_target(),
             destination=self.dest_edit.text(),
             range_mode=checked_range.property("key") if checked_range else "incremental",
@@ -1166,6 +1167,8 @@ class MainWindow(QMainWindow):
 
     def apply_account_workspace(self, state: Optional[dict]):
         state = state if isinstance(state, dict) else {}
+        if state.get("platform") not in (None, self.platform_combo.currentData()):
+            state = {}
         self.url_edit.setText(str(state.get("target", "")))
         target_type = str(state.get("target_type", "media"))
         for button in self.target_buttons:
@@ -1655,27 +1658,29 @@ class MainWindow(QMainWindow):
 
     def account_selected(self, idx):
         if 0 <= idx < len(self.accounts):
-            a = self.accounts[idx]
-            pidx = self.platform_combo.findData(a.platform)
-            if pidx >= 0: self.platform_combo.setCurrentIndex(pidx)
             cidx = self.account_combo.findData(idx)
             if cidx >= 0: self.account_combo.setCurrentIndex(cidx)
 
     def account_combo_changed(self):
         idx = self.account_combo.currentData()
-        account_id = (self.accounts[idx].profile_id
-                      if isinstance(idx, int) and 0 <= idx < len(self.accounts) else "")
+        registered = isinstance(idx, int) and 0 <= idx < len(self.accounts)
+        account_id = self.accounts[idx].profile_id if registered else ""
         previous_id = self._active_account_id
         if self._account_workspace_ready and previous_id and previous_id != account_id:
             self.account_sessions[previous_id] = self.account_workspace_state()
         self.account_list.blockSignals(True)
         self.account_list.setCurrentRow(idx if isinstance(idx, int) else -1)
         self.account_list.blockSignals(False)
-        if isinstance(idx, int) and 0 <= idx < len(self.accounts):
+        if registered:
             a = self.accounts[idx]
             pidx = self.platform_combo.findData(a.platform)
             if pidx >= 0 and pidx != self.platform_combo.currentIndex():
                 self.platform_combo.setCurrentIndex(pidx)
+        self.platform_combo.setEnabled(not registered)
+        self.platform_combo.setToolTip(
+            "サービスは選択中のアカウントに固定されます。変更する場合は「認証なし」を選んでください。"
+            if registered else ""
+        )
         if self._account_workspace_ready and previous_id != account_id:
             self.apply_account_workspace(self.account_sessions.get(account_id))
         self._active_account_id = account_id
