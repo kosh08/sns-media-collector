@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.3.5"
 
 
 class UpdateCheckWorker(QThread):
@@ -323,7 +323,10 @@ class PixivLoginDialog(QDialog):
             return
         self._code_sent = True
         self.status.setText("pixivの認証情報を安全に保存しています…")
-        self.process.write((url.toString() + "\n").encode("utf-8"))
+        # gallery-dl accepts a callback URL only when the authorization code is
+        # its final ``=value`` component.  pixiv can append other query
+        # parameters, so always pass the already parsed code itself.
+        self.process.write((code + "\n").encode("utf-8"))
 
     def _process_finished(self, code, _status):
         self._read_process()

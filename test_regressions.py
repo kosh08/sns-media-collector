@@ -294,7 +294,7 @@ class Regressions(unittest.TestCase):
         source = (
             "import sys,sqlite3,pickle,pathlib; p=pathlib.Path(sys.argv[1]); "
             "print('https://app-api.pixiv.net/web/v1/login?client=pixiv-android&code_challenge=test',flush=True); "
-            "line=sys.stdin.readline(); assert 'code=sample-code' in line; p.parent.mkdir(parents=True,exist_ok=True); "
+            "line=sys.stdin.readline(); assert line.strip() == 'sample-code', line; p.parent.mkdir(parents=True,exist_ok=True); "
             "c=sqlite3.connect(p); c.execute('CREATE TABLE data (key TEXT PRIMARY KEY,value TEXT,expires INTEGER)'); "
             "c.execute('INSERT INTO data VALUES (?,?,?)',('gallery_dl.extractor.pixiv._refresh_token_cache-None',pickle.dumps('secret'),0)); "
             "c.commit(); c.close()"
@@ -312,7 +312,7 @@ class Regressions(unittest.TestCase):
         self.assertTrue(dialog._login_url_loaded)
         with patch('app.QMessageBox.information', return_value=0):
             dialog._url_changed(QUrl(
-                'https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback?code=sample-code'
+                'https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback?code=sample-code&state=after-code'
             ))
             limit = time.monotonic() + 5
             while dialog.process.state() != QProcess.NotRunning and time.monotonic() < limit:
