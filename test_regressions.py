@@ -206,6 +206,33 @@ class Regressions(unittest.TestCase):
         self.assertFalse(self.w.chk_video.isChecked())
         self.assertNotIn('firefox', str(self.w.settings.value('last_session')))
 
+    def test_account_switch_restores_each_target_and_destination(self):
+        from app import AccountProfile
+        first = AccountProfile('first', 'x')
+        second = AccountProfile('second', 'x')
+        self.w.accounts = [first, second]
+        self.w.save_accounts(); self.w.refresh_accounts(first.profile_id)
+
+        self.w.url_edit.setText('@first_target')
+        self.w.dest_edit.setText(str(self.root / 'first images'))
+        self.w.account_combo.setCurrentIndex(self.w.account_combo.findData(1))
+        self.assertEqual(self.w.url_edit.text(), '')
+        self.assertEqual(self.w.dest_edit.text(), '')
+
+        self.w.url_edit.setText('@second_target')
+        self.w.dest_edit.setText(str(self.root / 'second images'))
+        self.w.account_combo.setCurrentIndex(self.w.account_combo.findData(0))
+        self.assertEqual(self.w.url_edit.text(), '@first_target')
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'first images'))
+
+        self.w.account_combo.setCurrentIndex(self.w.account_combo.findData(1))
+        self.assertEqual(self.w.url_edit.text(), '@second_target')
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'second images'))
+        self.w.close(); self.w = MainWindow(); self.w.start_next_job = lambda: None
+        self.assertEqual(self.w.accounts[self.w.account_combo.currentData()].profile_id, second.profile_id)
+        self.assertEqual(self.w.url_edit.text(), '@second_target')
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'second images'))
+
     def test_legacy_accounts_migrate_and_refresh_preserves_selection(self):
         self.w.close()
         (self.root / 'accounts.json').write_text(json.dumps([

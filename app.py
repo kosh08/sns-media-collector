@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 
 
 class UpdateCheckWorker(QThread):
@@ -1102,12 +1102,24 @@ class MainWindow(QMainWindow):
         self.update_check_worker: Optional[UpdateCheckWorker] = None
         self.update_download_worker: Optional[UpdateDownloadWorker] = None
         self._update_check_silent = False
+        self._account_workspace_ready = False
+        self._active_account_id = ""
+        try:
+            saved_workspaces = json.loads(str(self.settings.value("account_sessions", "{}")))
+            self.account_sessions = saved_workspaces if isinstance(saved_workspaces, dict) else {}
+        except (ValueError, TypeError):
+            self.account_sessions = {}
 
         self.build_ui()
         self.refresh_accounts()
         self.refresh_engine_status()
         self.refresh_recent_downloads()
         self.restore_session()
+        if not self._active_account_id:
+            idx = self.account_combo.currentData()
+            if isinstance(idx, int) and 0 <= idx < len(self.accounts):
+                self._active_account_id = self.accounts[idx].profile_id
+        self._account_workspace_ready = True
         self._session_timer = QTimer(self)
         self._session_timer.setSingleShot(True)
         self._session_timer.setInterval(300)
@@ -1131,6 +1143,8 @@ class MainWindow(QMainWindow):
     def save_session(self):
         idx = self.account_combo.currentData()
         account_id = self.accounts[idx].profile_id if isinstance(idx, int) and 0 <= idx < len(self.accounts) else ""
+        if account_id:
+            self.account_sessions[account_id] = self.account_workspace_state()
         checked_range = self.range_group.checkedButton()
         state = dict(account_id=account_id, platform=self.platform_combo.currentData(),
                      target=self.url_edit.text(), target_type=self.selected_target(),
@@ -1138,7 +1152,31 @@ class MainWindow(QMainWindow):
                      date_after=self.date_after_edit.text(),
                      options={name: widget.isChecked() for name, widget in self.session_checkboxes().items()})
         self.settings.setValue("last_session", json.dumps(state, ensure_ascii=False))
+        self.settings.setValue("account_sessions", json.dumps(self.account_sessions, ensure_ascii=False))
         self.settings.sync()
+
+    def account_workspace_state(self) -> dict:
+        checked_range = self.range_group.checkedButton()
+        return dict(
+            target=self.url_edit.text(), target_type=self.selected_target(),
+            destination=self.dest_edit.text(),
+            range_mode=checked_range.property("key") if checked_range else "incremental",
+            date_after=self.date_after_edit.text(),
+        )
+
+    def apply_account_workspace(self, state: Optional[dict]):
+        state = state if isinstance(state, dict) else {}
+        self.url_edit.setText(str(state.get("target", "")))
+        target_type = str(state.get("target_type", "media"))
+        for button in self.target_buttons:
+            if button.property("key") == target_type:
+                button.setChecked(True)
+                break
+        range_mode = str(state.get("range_mode", "incremental"))
+        self.range_buttons.get(range_mode, self.range_buttons["incremental"]).setChecked(True)
+        self.date_after_edit.setText(str(state.get("date_after", "")))
+        self.sync_target_ui()
+        self.dest_edit.setText(str(state.get("destination", "")))
 
     def restore_session(self):
         try:
@@ -1162,6 +1200,17 @@ class MainWindow(QMainWindow):
                 value = state.get("options", {}).get(name)
                 if isinstance(value, bool):
                     widget.setChecked(value)
+            current_idx = self.account_combo.currentData()
+            account_id = (self.accounts[current_idx].profile_id
+                          if isinstance(current_idx, int) and 0 <= current_idx < len(self.accounts) else "")
+            if account_id:
+                if account_id in self.account_sessions:
+                    self.apply_account_workspace(self.account_sessions[account_id])
+                else:
+                    # Migrate the former single global workspace to the account
+                    # that was selected when the previous version last closed.
+                    self.account_sessions[account_id] = self.account_workspace_state()
+            self._active_account_id = account_id
         except (ValueError, TypeError, AttributeError) as exc:
             self.log.append(f"[SESSION] 前回の画面設定を復元できませんでした: {exc}")
 
@@ -1614,6 +1663,11 @@ class MainWindow(QMainWindow):
 
     def account_combo_changed(self):
         idx = self.account_combo.currentData()
+        account_id = (self.accounts[idx].profile_id
+                      if isinstance(idx, int) and 0 <= idx < len(self.accounts) else "")
+        previous_id = self._active_account_id
+        if self._account_workspace_ready and previous_id and previous_id != account_id:
+            self.account_sessions[previous_id] = self.account_workspace_state()
         self.account_list.blockSignals(True)
         self.account_list.setCurrentRow(idx if isinstance(idx, int) else -1)
         self.account_list.blockSignals(False)
@@ -1622,6 +1676,9 @@ class MainWindow(QMainWindow):
             pidx = self.platform_combo.findData(a.platform)
             if pidx >= 0 and pidx != self.platform_combo.currentIndex():
                 self.platform_combo.setCurrentIndex(pidx)
+        if self._account_workspace_ready and previous_id != account_id:
+            self.apply_account_workspace(self.account_sessions.get(account_id))
+        self._active_account_id = account_id
 
     def platform_changed(self):
         p = self.platform_combo.currentData()
