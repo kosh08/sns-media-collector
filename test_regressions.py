@@ -12,7 +12,7 @@ from unittest.mock import patch
 import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QUrl
 from PySide6.QtWidgets import QApplication
-from app import MainWindow, DownloadJob
+from app import MainWindow, DownloadJob, pixiv_callback_code, sanitized_pixiv_oauth_diagnostic
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 APP = QApplication.instance() or QApplication([])
 OLD = LikeSeenRecord('2086000000000000000', 1)
@@ -356,9 +356,26 @@ class Regressions(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '未連携'):
             self.w.ensure_auth_ready('managed_pixiv', str(self.root / 'missing.sqlite3'))
 
+    def test_pixiv_callback_accepts_https_and_app_scheme(self):
+        self.assertEqual(pixiv_callback_code(QUrl(
+            'https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback?code=https-code&state=tail'
+        )), 'https-code')
+        self.assertEqual(pixiv_callback_code(QUrl(
+            'pixiv://account/login?code=app-code&via=login'
+        )), 'app-code')
+        self.assertEqual(pixiv_callback_code(QUrl('https://www.pixiv.net/login')), '')
+
+    def test_pixiv_oauth_diagnostic_redacts_credentials(self):
+        text = sanitized_pixiv_oauth_diagnostic(
+            'invalid_grant code=SECRET&via=login refresh_token: TOKENVALUE', 1
+        )
+        self.assertIn('invalid_grant', text)
+        self.assertNotIn('SECRET', text)
+        self.assertNotIn('TOKENVALUE', text)
+
     def test_pixiv_login_dialog_captures_callback_and_uses_isolated_cache(self):
         try:
-            from PySide6.QtWebEngineCore import QWebEngineProfile  # noqa: F401
+            from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile  # noqa: F401
         except ImportError as exc:
             self.skipTest(f'QtWebEngine runtime unavailable: {exc}')
         from app import PixivLoginDialog
@@ -384,9 +401,11 @@ class Regressions(unittest.TestCase):
             APP.processEvents(); time.sleep(.01)
         self.assertTrue(dialog._login_url_loaded)
         with patch('app.QMessageBox.information', return_value=0):
-            dialog._url_changed(QUrl(
-                'https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback?code=sample-code&state=after-code'
-            ))
+            accepted_navigation = dialog.page.acceptNavigationRequest(
+                QUrl('pixiv://account/login?code=sample-code&via=login'),
+                QWebEnginePage.NavigationType.NavigationTypeOther, True,
+            )
+            self.assertFalse(accepted_navigation)
             limit = time.monotonic() + 5
             while dialog.process.state() != QProcess.NotRunning and time.monotonic() < limit:
                 APP.processEvents(); time.sleep(.01)

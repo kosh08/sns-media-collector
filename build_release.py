@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent
 
@@ -38,6 +39,32 @@ def helper_self_test(executable: Path, report: Path):
     checked([executable, '--self-test', report])
     if json.loads(report.read_text(encoding='utf-8')).get('success') is not True:
         raise RuntimeError(f'Updater self-test failed: {report}')
+
+
+def pixiv_oauth_wait_self_test(executable: Path):
+    """Ensure the frozen gallery-dl sidecar keeps stdin open for pixiv OAuth."""
+    process = subprocess.Popen(
+        [str(executable), '--ignore-config', '--no-colors',
+         '-o', 'browser=false', 'oauth:pixiv'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace',
+    )
+    try:
+        time.sleep(6)
+        if process.poll() is not None:
+            output = process.communicate(timeout=5)[0]
+            raise RuntimeError(
+                'Frozen gallery-dl exited instead of waiting for pixiv OAuth input: '
+                + output[-1000:]
+            )
+        process.terminate()
+        output = process.communicate(timeout=10)[0]
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=10)
+    if 'https://app-api.pixiv.net/web/v1/login?' not in output:
+        raise RuntimeError('Frozen gallery-dl did not emit the pixiv OAuth login URL')
 
 
 def compile_setup(compiler: Path, bundle: Path, output: Path, version: str) -> Path:
@@ -105,6 +132,7 @@ def main() -> int:
                  '--console', '--name', 'gallery-dl', '--collect-all', 'gallery_dl',
                  '--distpath', work / 'engine', '--workpath', work / 'engine-work',
                  '--specpath', work, ROOT / 'gallery_dl_launcher.py'], cwd=ROOT)
+        pixiv_oauth_wait_self_test(work / 'engine' / 'gallery-dl.exe')
         checked([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
                  '--windowed', '--name', 'SNSMediaCollectorUpdater',
                  '--distpath', work / 'updater', '--workpath', work / 'updater-work',

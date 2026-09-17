@@ -40,6 +40,7 @@ class ReleaseTests(unittest.TestCase):
         source=(build_release.ROOT / 'build_release.py').read_text(encoding='utf-8')
         self.assertIn('PySide6.QtWebEngineCore', source)
         self.assertIn('PySide6.QtWebEngineWidgets', source)
+        self.assertIn('pixiv_oauth_wait_self_test', source)
 
     def test_release_notes_are_used_for_public_release(self):
         workflow=(build_release.ROOT / '.github/workflows/windows-installer.yml').read_text(encoding='utf-8')

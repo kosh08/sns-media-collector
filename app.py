@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.7"
+APP_VERSION = "0.3.8"
 
 
 class UpdateCheckWorker(QThread):
@@ -244,12 +244,45 @@ class XLoginDialog(QDialog):
             QMessageBox.warning(self, "Xログインが必要です", str(exc))
 
 
+def pixiv_callback_code(url: QUrl) -> str:
+    """Return a pixiv OAuth code from either known callback form."""
+    is_https_callback = (
+        url.scheme() in {"http", "https"}
+        and url.path().endswith("/web/v1/users/auth/pixiv/callback")
+    )
+    is_app_callback = (
+        url.scheme() == "pixiv"
+        and url.host() == "account"
+        and url.path().rstrip("/") == "/login"
+    )
+    if not (is_https_callback or is_app_callback):
+        return ""
+    return QUrlQuery(url).queryItemValue("code").strip()
+
+
+def sanitized_pixiv_oauth_diagnostic(output: str, returncode: int) -> str:
+    """Create a useful OAuth failure summary without exposing credentials."""
+    text = str(output or "")
+    text = re.sub(
+        r"((?:[?&]|\b)(?:code|token|secret|verifier|challenge)=)[^&\s]+",
+        r"\1<redacted>", text, flags=re.I,
+    )
+    text = re.sub(r"(?i)(refresh[-_ ]?token\s*(?:is|:|=)?\s*)\S+", r"\1<redacted>", text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    useful = [line for line in lines if any(word in line.lower() for word in (
+        "error", "failed", "expired", "invalid", "abort", "eof", "exception", "traceback",
+    ))]
+    detail = " / ".join((useful or lines)[-4:])
+    return f"終了コード {int(returncode)}" + (f"：{detail[:700]}" if detail else "")
+
+
 class PixivLoginDialog(QDialog):
     """Run gallery-dl's PKCE flow in an isolated embedded browser."""
     def __init__(self, data_dir: Path, profile_id: str, cache_path: Path,
                  engine: list[str], parent=None, *, persistent_web_profile: bool = True):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.data_dir = Path(data_dir)
         self.cache_path = Path(cache_path)
         self.engine = list(engine)
         self._oauth_output = ""
@@ -283,7 +316,15 @@ class PixivLoginDialog(QDialog):
             )
         else:
             self.web_profile = QWebEngineProfile(self)
-        self.page = QWebEnginePage(self.web_profile, self)
+        dialog = self
+        class PixivOAuthPage(QWebEnginePage):
+            def acceptNavigationRequest(page, url, navigation_type, is_main_frame):
+                dialog._url_changed(url)
+                if url.scheme() == "pixiv":
+                    return False
+                return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
+
+        self.page = PixivOAuthPage(self.web_profile, self)
         self.view = QWebEngineView(self); self.view.setPage(self.page)
         self.view.urlChanged.connect(self._url_changed)
         layout.addWidget(self.view, 1)
@@ -316,9 +357,7 @@ class PixivLoginDialog(QDialog):
     def _url_changed(self, url: QUrl):
         if self._code_sent:
             return
-        if "/web/v1/users/auth/pixiv/callback" not in url.path():
-            return
-        code = QUrlQuery(url).queryItemValue("code")
+        code = pixiv_callback_code(url)
         if not code:
             return
         self._code_sent = True
@@ -334,6 +373,7 @@ class PixivLoginDialog(QDialog):
             self._oauth_output = ""
             return
         authenticated = bool(inspect_pixiv_cache(self.cache_path).get("authenticated"))
+        diagnostic = sanitized_pixiv_oauth_diagnostic(self._oauth_output, int(code))
         self._oauth_output = ""
         if int(code) == 0 and authenticated:
             self.status.setText("✓ pixiv連携を保存しました。")
@@ -341,9 +381,16 @@ class PixivLoginDialog(QDialog):
             self.accept()
         else:
             self.status.setText("pixiv連携を完了できませんでした。もう一度お試しください。")
+            try:
+                (self.data_dir / "pixiv-oauth-last.log").write_text(
+                    diagnostic + "\n", encoding="utf-8"
+                )
+            except OSError:
+                pass
+            stage = "認証コードを受け取る前に認証処理が終了しました。" if not self._code_sent else "pixivが認証コードを受理しませんでした。"
             QMessageBox.warning(
                 self, "pixiv連携エラー",
-                "認証コードの有効時間が切れたか、pixivとの通信に失敗しました。画面を閉じて再試行してください。",
+                f"{stage}\n{diagnostic}\n\n画面を閉じて再試行してください。",
             )
 
     def _process_error(self, _error):
