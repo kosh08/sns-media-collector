@@ -258,6 +258,21 @@ class Regressions(unittest.TestCase):
         self.assertEqual(self.w.url_edit.text(), '123456')
         self.assertEqual(self.w.dest_edit.text(), str(self.root / 'pixiv images'))
 
+    def test_pixiv_bookmark_range_explains_archive_based_incremental_mode(self):
+        self.w.platform_combo.setCurrentIndex(self.w.platform_combo.findData('pixiv'))
+        likes = next(
+            button for button in self.w.target_buttons
+            if button.property('key') == 'likes'
+        )
+        likes.setChecked(True)
+        self.w.sync_target_ui()
+        self.assertEqual(
+            self.w.range_buttons['incremental'].text(),
+            '新しいブックマークだけ',
+        )
+        self.assertIn('作品の投稿日に関係なく', self.w.range_note.text())
+        self.assertIn('古い作品を最近追加した場合も対象', self.w.range_status.text())
+
     def test_same_target_can_keep_a_different_destination_per_account(self):
         from app import AccountProfile
         first = AccountProfile('first', 'x')

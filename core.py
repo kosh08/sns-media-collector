@@ -837,6 +837,14 @@ def build_command(
                 "X Likesの差分取得はアンカー確認パイプラインを使います。"
                 "GUIの『新しいいいねだけ』から実行してください。"
             )
+        elif platform == "pixiv" and target_type == "likes":
+            # pixiv's bookmark feed is ordered by when an item was bookmarked,
+            # but the extractor's ``date`` value is the artwork creation date.
+            # Applying --date-after here loses older artworks that were only
+            # bookmarked recently.  Walk the feed and let the target-scoped
+            # download archive (plus gallery-dl's existing-file checks) skip
+            # media we have already saved.
+            pass
         else:
             cutoff = incremental_date_after(profile, overlap_minutes=overlap_minutes)
             if cutoff:

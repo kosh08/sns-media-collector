@@ -291,6 +291,48 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--cache-file") + 1], str(Path(td) / "pixiv.sqlite3"))
             self.assertIn("refresh-token=cache", cmd)
 
+    def test_pixiv_bookmark_incremental_does_not_filter_by_artwork_date(self):
+        """A newly bookmarked old artwork must remain eligible for download."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile = TargetProfile(
+                key="pixiv:123", platform="pixiv", target_name="123",
+                last_scan_started_at="2026-09-18T10:00:00Z",
+                last_success_at="2026-09-18T10:05:00Z",
+            )
+            cmd = build_command(
+                ["gallery-dl"], platform="pixiv",
+                url="https://www.pixiv.net/users/123/bookmarks/artworks",
+                destination=root / "out", account_name="pix",
+                auth_mode="managed_pixiv", auth_value=str(root / "pixiv.sqlite3"),
+                archive_scope="pixiv:123:likes", extensions=["jpg", "png"],
+                capture_internal_metadata=False, use_archive=True,
+                archive_dir=root / "archives", direct_folder=True,
+                range_mode="incremental", profile=profile, target_type="likes",
+            )
+            self.assertNotIn("--date-after", cmd)
+            self.assertIn("--download-archive", cmd)
+            self.assertEqual(cmd[-1], "https://www.pixiv.net/users/123/bookmarks/artworks")
+
+    def test_pixiv_posts_incremental_still_uses_artwork_date(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile = TargetProfile(
+                key="pixiv:123", platform="pixiv", target_name="123",
+                last_success_at="2026-09-18T10:05:00Z",
+            )
+            cmd = build_command(
+                ["gallery-dl"], platform="pixiv",
+                url="https://www.pixiv.net/users/123",
+                destination=root / "out", account_name="pix",
+                auth_mode="managed_pixiv", auth_value=str(root / "pixiv.sqlite3"),
+                archive_scope="pixiv:123:posts", extensions=["jpg"],
+                capture_internal_metadata=False, use_archive=True,
+                archive_dir=root / "archives", direct_folder=True,
+                range_mode="incremental", profile=profile, target_type="posts",
+            )
+            self.assertIn("--date-after", cmd)
+
 
     def test_gallery_datetime_python310_compatible_offset(self):
         dt = parse_gallery_datetime("2026-08-09T12:00:00+0900")

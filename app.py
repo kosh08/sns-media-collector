@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.9"
+APP_VERSION = "0.3.10"
 
 
 class UpdateCheckWorker(QThread):
@@ -1428,11 +1428,11 @@ class MainWindow(QMainWindow):
             if key == "incremental": b.setChecked(True)
         self.date_after_edit = QLineEdit(); self.date_after_edit.setPlaceholderText("例: 2026-08-01")
         self.date_after_edit.setMaximumWidth(170); range_row.addWidget(self.date_after_edit); range_row.addStretch(); cl.addLayout(range_row)
-        range_note = QLabel(
+        self.range_note = QLabel(
             "Hitomi引継ぎ済みなら、最新の既存Tweetを初回基準にして10分前から再確認します。"
             "archiveで既存分を飛ばすので、基本は続きだけ取得します。"
         )
-        range_note.setObjectName("muted"); range_note.setWordWrap(True); cl.addWidget(range_note)
+        self.range_note.setObjectName("muted"); self.range_note.setWordWrap(True); cl.addWidget(self.range_note)
         self.range_status = QLabel("取得基準を確認中…")
         self.range_status.setObjectName("muted"); self.range_status.setWordWrap(True); cl.addWidget(self.range_status)
         self.range_group.buttonClicked.connect(lambda _b: self.sync_target_ui())
@@ -1917,12 +1917,34 @@ class MainWindow(QMainWindow):
     def sync_target_ui(self):
         profile = self.current_target_profile(create=False)
         is_x_likes = self.platform_combo.currentData() == "x" and self.selected_target() == "likes"
+        is_pixiv_bookmarks = self.platform_combo.currentData() == "pixiv" and self.selected_target() == "likes"
         if hasattr(self, "likes_baseline_btn"):
             self.likes_baseline_btn.setEnabled(is_x_likes and not self.has_pending_likes_job())
             self.likes_anchor_spin.setEnabled(is_x_likes)
             self.likes_probe_spin.setEnabled(is_x_likes)
             self.likes_note.setEnabled(is_x_likes)
-            self.range_buttons["incremental"].setText("新しいいいねだけ" if is_x_likes else "前回 / 引継ぎ基準以降")
+            if is_x_likes:
+                incremental_label = "新しいいいねだけ"
+            elif is_pixiv_bookmarks:
+                incremental_label = "新しいブックマークだけ"
+            else:
+                incremental_label = "前回 / 引継ぎ基準以降"
+            self.range_buttons["incremental"].setText(incremental_label)
+        if hasattr(self, "range_note"):
+            if is_pixiv_bookmarks:
+                self.range_note.setText(
+                    "ブックマーク一覧を新しい順に確認します。作品の投稿日に関係なく、"
+                    "最近ブックマークした作品を取得し、保存済みはarchiveで省きます。"
+                )
+            elif self.platform_combo.currentData() == "pixiv":
+                self.range_note.setText(
+                    "pixiv作品の投稿日を前回成功時刻から再確認し、archiveで保存済みを省きます。"
+                )
+            else:
+                self.range_note.setText(
+                    "Hitomi引継ぎ済みなら、最新の既存Tweetを初回基準にして10分前から再確認します。"
+                    "archiveで既存分を飛ばすので、基本は続きだけ取得します。"
+                )
         if profile and profile.destination:
             self.dest_edit.setText(profile.destination)
             self.chk_direct_folder.setChecked(profile.direct_folder)
@@ -1983,6 +2005,12 @@ class MainWindow(QMainWindow):
                 f"✓ Likesアンカー: {self.display_local_time(profile.likes_anchor_at)} / "
                 f"認証 {profile.likes_anchor_login or '未記録'} / "
                 f"{profile.likes_anchor_posts:,}投稿。差分取得はアンカー到達で即終了します。"
+            )
+
+        if self.platform_combo.currentData() == "pixiv" and self.selected_target() == "likes":
+            return (
+                "✓ ブックマーク一覧を新しい順に確認します。作品の投稿日では絞り込まず、"
+                "archiveと既存ファイルで保存済みを省くため、古い作品を最近追加した場合も対象です。"
             )
 
         if self.platform_combo.currentData() != "x":
