@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QProgressBar,
     QRadioButton, QScrollArea, QSpinBox, QSplitter,
-    QTextEdit, QVBoxLayout, QWidget
+    QTextEdit, QToolButton, QVBoxLayout, QWidget
 )
 from updater_core import download_update, fetch_latest_update
 from auth_store import (
@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.10"
+APP_VERSION = "0.3.11"
 
 
 class UpdateCheckWorker(QThread):
@@ -89,6 +89,7 @@ QFrame#thumb:hover { border: 1px solid #4b83f5; }
 QLabel#title { font-size: 20px; font-weight: 700; }
 QLabel#muted { color: #8f9bb0; }
 QLabel#section { font-weight: 700; font-size: 14px; }
+QLabel#step { color: #8db5ff; font-weight: 700; font-size: 13px; padding-top: 4px; }
 QLineEdit, QComboBox, QTextEdit, QSpinBox {
     background: #0f1621; border: 1px solid #2a3850; border-radius: 6px;
     padding: 7px; selection-background-color: #2d6cdf;
@@ -1292,6 +1293,8 @@ class MainWindow(QMainWindow):
             state = {}
         self.url_edit.setText(str(state.get("target", "")))
         target_type = str(state.get("target_type", "media"))
+        if self.platform_combo.currentData() == "pixiv" and target_type == "media":
+            target_type = "posts"
         for button in self.target_buttons:
             if button.property("key") == target_type:
                 button.setChecked(True)
@@ -1313,8 +1316,11 @@ class MainWindow(QMainWindow):
             if platform >= 0:
                 self.platform_combo.setCurrentIndex(platform)
             self.url_edit.setText(str(state.get("target", "")))
+            restored_target = state.get("target_type")
+            if self.platform_combo.currentData() == "pixiv" and restored_target == "media":
+                restored_target = "posts"
             for button in self.target_buttons:
-                if button.property("key") == state.get("target_type"):
+                if button.property("key") == restored_target:
                     button.setChecked(True)
             self.range_buttons.get(state.get("range_mode"), self.range_buttons["incremental"]).setChecked(True)
             self.date_after_edit.setText(str(state.get("date_after", "")))
@@ -1374,19 +1380,21 @@ class MainWindow(QMainWindow):
         w = QFrame(); w.setObjectName("sidebar"); w.setMinimumWidth(235)
         l = QVBoxLayout(w); l.setContentsMargins(12, 12, 12, 12)
         top = QHBoxLayout(); sec = QLabel("アカウント"); sec.setObjectName("section")
-        add = QPushButton("＋ 追加"); add.clicked.connect(self.add_account)
+        add = QPushButton("＋ アカウント"); add.clicked.connect(self.add_account)
         top.addWidget(sec); top.addStretch(); top.addWidget(add); l.addLayout(top)
         self.account_list = QListWidget(); self.account_list.currentRowChanged.connect(self.account_selected)
         l.addWidget(self.account_list, 1)
-        quick_login = QPushButton("Xログイン / Cookie更新")
-        quick_login.clicked.connect(self.quick_x_login)
-        edit = QPushButton("選択アカウントを編集"); edit.clicked.connect(self.edit_account)
-        delete = QPushButton("選択アカウントを削除"); delete.clicked.connect(self.delete_account)
-        l.addWidget(quick_login); l.addWidget(edit); l.addWidget(delete)
+        account_actions = QLabel("選択中のアカウント"); account_actions.setObjectName("muted")
+        l.addWidget(account_actions)
+        self.quick_x_login_btn = QPushButton("Xへログイン / ログイン更新")
+        self.quick_x_login_btn.clicked.connect(self.quick_x_login)
+        self.pixiv_login_btn = QPushButton("pixivへログイン / 連携更新")
+        self.pixiv_login_btn.clicked.connect(self.start_pixiv_oauth)
+        self.edit_account_btn = QPushButton("アカウント設定を編集"); self.edit_account_btn.clicked.connect(self.edit_account)
+        self.delete_account_btn = QPushButton("アカウントを削除"); self.delete_account_btn.clicked.connect(self.delete_account)
+        l.addWidget(self.quick_x_login_btn); l.addWidget(self.pixiv_login_btn)
+        l.addWidget(self.edit_account_btn); l.addWidget(self.delete_account_btn)
         l.addSpacing(10)
-        oauth = QPushButton("pixiv OAuth を開始"); oauth.clicked.connect(self.start_pixiv_oauth)
-        oauth.setText("pixivログイン / 連携更新")
-        l.addWidget(oauth)
         open_data = QPushButton("データフォルダを開く"); open_data.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir))))
         l.addWidget(open_data)
         return w
@@ -1396,18 +1404,21 @@ class MainWindow(QMainWindow):
         content = QWidget(); l = QVBoxLayout(content); l.setContentsMargins(14, 12, 14, 12); l.setSpacing(12)
 
         card = QFrame(); card.setObjectName("card"); cl = QVBoxLayout(card); cl.setContentsMargins(18, 18, 18, 18); cl.setSpacing(12)
-        sec = QLabel("新しいダウンロード"); sec.setObjectName("section"); cl.addWidget(sec)
+        sec = QLabel("ダウンロード設定"); sec.setObjectName("section"); cl.addWidget(sec)
+
+        step_account = QLabel("使用するアカウント"); step_account.setObjectName("step"); cl.addWidget(step_account)
 
         platform_row = QHBoxLayout(); platform_row.addWidget(QLabel("取得元"))
         self.platform_combo = QComboBox(); self.platform_combo.addItem("X / Twitter", "x"); self.platform_combo.addItem("pixiv", "pixiv")
         self.platform_combo.currentIndexChanged.connect(self.platform_changed)
         platform_row.addWidget(self.platform_combo, 1); cl.addLayout(platform_row)
 
-        account_row = QHBoxLayout(); account_row.addWidget(QLabel("アカウント"))
+        account_row = QHBoxLayout(); account_row.addWidget(QLabel("選択"))
         self.account_combo = QComboBox(); self.account_combo.currentIndexChanged.connect(self.account_combo_changed)
         account_row.addWidget(self.account_combo, 1); cl.addLayout(account_row)
 
-        cl.addWidget(QLabel("URL / ユーザー名 / ID"))
+        step_target = QLabel("1. 何を取得する？"); step_target.setObjectName("step"); cl.addWidget(step_target)
+        cl.addWidget(QLabel("対象のURL・ユーザー名・pixivユーザーID"))
         self.url_edit = QLineEdit(); self.url_edit.setPlaceholderText("例: https://x.com/username / @username / pixiv user ID")
         self.url_edit.editingFinished.connect(self.sync_target_ui)
         cl.addWidget(self.url_edit)
@@ -1415,22 +1426,24 @@ class MainWindow(QMainWindow):
         target_row = QHBoxLayout(); target_row.addWidget(QLabel("取得対象"))
         self.target_group = QButtonGroup(self)
         self.target_buttons: list[QRadioButton] = []
-        for text, key in [("投稿", "posts"), ("メディア", "media"), ("いいね", "likes")]:
+        for text, key in [("投稿全体", "posts"), ("メディア欄", "media"), ("いいね", "likes")]:
             b = QRadioButton(text); b.setProperty("key", key); self.target_group.addButton(b); self.target_buttons.append(b); target_row.addWidget(b)
         self.target_buttons[1].setChecked(True); target_row.addStretch(); cl.addLayout(target_row)
         self.target_group.buttonClicked.connect(lambda _b: self.sync_target_ui())
 
-        range_row = QHBoxLayout(); range_row.addWidget(QLabel("取得範囲"))
+        step_range = QLabel("2. どこまで取得する？"); step_range.setObjectName("step"); cl.addWidget(step_range)
+        range_row = QHBoxLayout()
         self.range_group = QButtonGroup(self)
         self.range_buttons = {}
         for text, key in [("前回 / 引継ぎ基準以降", "incremental"), ("すべて", "all"), ("日付以降", "date")]:
             b = QRadioButton(text); b.setProperty("key", key); self.range_group.addButton(b); self.range_buttons[key] = b; range_row.addWidget(b)
             if key == "incremental": b.setChecked(True)
         self.date_after_edit = QLineEdit(); self.date_after_edit.setPlaceholderText("例: 2026-08-01")
-        self.date_after_edit.setMaximumWidth(170); range_row.addWidget(self.date_after_edit); range_row.addStretch(); cl.addLayout(range_row)
+        self.date_after_edit.setMaximumWidth(170); self.date_after_edit.setVisible(False)
+        range_row.addWidget(self.date_after_edit); range_row.addStretch(); cl.addLayout(range_row)
         self.range_note = QLabel(
             "Hitomi引継ぎ済みなら、最新の既存Tweetを初回基準にして10分前から再確認します。"
-            "archiveで既存分を飛ばすので、基本は続きだけ取得します。"
+            "保存済みは自動で省くので、基本は続きだけ取得します。"
         )
         self.range_note.setObjectName("muted"); self.range_note.setWordWrap(True); cl.addWidget(self.range_note)
         self.range_status = QLabel("取得基準を確認中…")
@@ -1438,6 +1451,8 @@ class MainWindow(QMainWindow):
         self.range_group.buttonClicked.connect(lambda _b: self.sync_target_ui())
         self.date_after_edit.textChanged.connect(lambda _t: self.sync_target_ui())
 
+        self.likes_controls = QWidget()
+        likes_box = QVBoxLayout(self.likes_controls); likes_box.setContentsMargins(0, 0, 0, 0); likes_box.setSpacing(8)
         likes_row = QHBoxLayout()
         self.likes_baseline_btn = QPushButton("Likesアンカーを作成（DLなし）")
         self.likes_baseline_btn.clicked.connect(self.start_likes_baseline)
@@ -1450,44 +1465,54 @@ class MainWindow(QMainWindow):
         self.likes_probe_spin = QSpinBox(); self.likes_probe_spin.setRange(50, 500); self.likes_probe_spin.setValue(300)
         self.likes_probe_spin.setSuffix(" メディア")
         likes_row.addWidget(self.likes_probe_spin)
-        likes_row.addStretch(); cl.addLayout(likes_row)
+        likes_row.addStretch(); likes_box.addLayout(likes_row)
         self.likes_note = QLabel(
             "Likesは先頭だけを軽く確認し、保存済みアンカーに到達したら終了します。アンカーより手前の新規投稿だけをDLします。"
             "アンカーが探索上限内で見つからない場合は、安全のため何もDLしません。"
         )
-        self.likes_note.setObjectName("muted"); self.likes_note.setWordWrap(True); cl.addWidget(self.likes_note)
+        self.likes_note.setObjectName("muted"); self.likes_note.setWordWrap(True); likes_box.addWidget(self.likes_note)
+        self.likes_controls.setVisible(False)
+        cl.addWidget(self.likes_controls)
 
+        step_media = QLabel("3. 保存する種類と場所"); step_media.setObjectName("step"); cl.addWidget(step_media)
         media_row = QHBoxLayout(); media_row.addWidget(QLabel("メディア"))
         self.chk_img = QCheckBox("画像"); self.chk_img.setChecked(True)
         self.chk_video = QCheckBox("動画"); self.chk_video.setChecked(True)
         self.chk_gif = QCheckBox("GIF"); self.chk_gif.setChecked(True)
         media_row.addWidget(self.chk_img); media_row.addWidget(self.chk_video); media_row.addWidget(self.chk_gif); media_row.addStretch(); cl.addLayout(media_row)
 
-        option_row = QHBoxLayout()
-        self.chk_archive = QCheckBox("重複をスキップ（archive）"); self.chk_archive.setChecked(True)
-        self.chk_internal_meta = QCheckBox("投稿者IDなどを内部DBに記録（JSONは作りません）"); self.chk_internal_meta.setChecked(True)
-        option_row.addWidget(self.chk_archive); option_row.addWidget(self.chk_internal_meta); option_row.addStretch(); cl.addLayout(option_row)
-
-        compat_row = QHBoxLayout()
-        self.chk_hitomi_name = QCheckBox("Hitomi互換ファイル名  [YY-MM-DD] TweetID_p0"); self.chk_hitomi_name.setChecked(True)
-        compat_row.addWidget(self.chk_hitomi_name); compat_row.addStretch(); cl.addLayout(compat_row)
-
         dest_row = QHBoxLayout(); dest_row.addWidget(QLabel("保存先"))
         self.dest_edit = QLineEdit(str(self.data_dir / "Library")); dest_row.addWidget(self.dest_edit, 1)
         browse = QPushButton("変更"); browse.clicked.connect(self.pick_destination); dest_row.addWidget(browse); cl.addLayout(dest_row)
 
-        dest_opt = QHBoxLayout()
-        self.chk_remember_dest = QCheckBox("この取得対象専用の保存先として記憶"); self.chk_remember_dest.setChecked(True)
-        self.chk_direct_folder = QCheckBox("選択フォルダ直下に保存（Hitomi引継ぎ向け）"); self.chk_direct_folder.setChecked(True)
-        dest_opt.addWidget(self.chk_remember_dest); dest_opt.addWidget(self.chk_direct_folder); dest_opt.addStretch(); cl.addLayout(dest_opt)
+        self.chk_remember_dest = QCheckBox("このアカウント・取得対象の保存先として記憶"); self.chk_remember_dest.setChecked(True)
+        cl.addWidget(self.chk_remember_dest)
 
         target_row2 = QHBoxLayout()
         self.target_status = QLabel("この取得対象の保存先はまだ未登録です。"); self.target_status.setObjectName("muted"); self.target_status.setWordWrap(True)
         target_row2.addWidget(self.target_status, 1)
-        import_btn = QPushButton("既存Hitomiフォルダを引継ぎ / archive登録")
-        import_btn.clicked.connect(self.index_existing_hitomi_folder); target_row2.addWidget(import_btn); cl.addLayout(target_row2)
+        self.import_btn = QPushButton("既存のHitomi保存フォルダを引き継ぐ")
+        self.import_btn.clicked.connect(self.index_existing_hitomi_folder); target_row2.addWidget(self.import_btn); cl.addLayout(target_row2)
 
-        buttons = QHBoxLayout(); self.preview_btn = QPushButton("コマンド確認"); self.preview_btn.clicked.connect(self.preview_command)
+        self.advanced_toggle = QToolButton()
+        self.advanced_toggle.setText("▶ 詳細設定")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setChecked(False)
+        self.advanced_toggle.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        cl.addWidget(self.advanced_toggle)
+        self.advanced_panel = QWidget()
+        advanced = QVBoxLayout(self.advanced_panel); advanced.setContentsMargins(12, 4, 0, 4); advanced.setSpacing(8)
+        self.chk_archive = QCheckBox("保存済みファイルを重複取得しない（推奨）"); self.chk_archive.setChecked(True)
+        self.chk_internal_meta = QCheckBox("投稿者IDなどをアプリ内に記録（画像フォルダにJSONは作りません）"); self.chk_internal_meta.setChecked(True)
+        self.chk_hitomi_name = QCheckBox("Xのファイル名をHitomi Downloader形式にする"); self.chk_hitomi_name.setChecked(True)
+        self.chk_direct_folder = QCheckBox("指定した保存先フォルダへ直接保存する"); self.chk_direct_folder.setChecked(True)
+        advanced.addWidget(self.chk_archive); advanced.addWidget(self.chk_internal_meta)
+        advanced.addWidget(self.chk_hitomi_name); advanced.addWidget(self.chk_direct_folder)
+        self.advanced_panel.setVisible(False)
+        self.advanced_toggle.toggled.connect(self.toggle_advanced_settings)
+        cl.addWidget(self.advanced_panel)
+
+        buttons = QHBoxLayout(); self.preview_btn = QPushButton("実行内容を確認"); self.preview_btn.clicked.connect(self.preview_command)
         self.start_btn = QPushButton("⬇ ダウンロード開始"); self.start_btn.setObjectName("primary"); self.start_btn.clicked.connect(self.enqueue_download)
         buttons.addStretch(); buttons.addWidget(self.preview_btn); buttons.addWidget(self.start_btn); cl.addLayout(buttons)
         l.addWidget(card)
@@ -1538,6 +1563,19 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame); scroll.setWidget(holder)
         l.addWidget(scroll, 1)
         return w
+
+    def toggle_advanced_settings(self, expanded: bool):
+        self.advanced_panel.setVisible(bool(expanded))
+        self.advanced_toggle.setText("▼ 詳細設定" if expanded else "▶ 詳細設定")
+
+    def refresh_account_actions(self):
+        idx = self.account_combo.currentData() if hasattr(self, "account_combo") else -1
+        registered = isinstance(idx, int) and 0 <= idx < len(self.accounts)
+        platform = self.accounts[idx].platform if registered else ""
+        self.quick_x_login_btn.setVisible(registered and platform == "x")
+        self.pixiv_login_btn.setVisible(registered and platform == "pixiv")
+        self.edit_account_btn.setEnabled(registered)
+        self.delete_account_btn.setEnabled(registered)
 
     def reveal_last_saved_file(self):
         if self.last_saved_path and self.last_saved_path.exists():
@@ -1810,15 +1848,21 @@ class MainWindow(QMainWindow):
         if self._account_workspace_ready and previous_id != account_id:
             self.apply_account_workspace(self.account_sessions.get(account_id))
         self._active_account_id = account_id
+        self.refresh_account_actions()
 
     def platform_changed(self):
         p = self.platform_combo.currentData()
-        labels = [("投稿", "posts"), ("メディア", "media"), ("いいね", "likes")] if p == "x" else [("作品", "posts"), ("イラスト", "media"), ("ブックマーク", "likes")]
+        labels = ([("投稿全体", "posts"), ("メディア欄", "media"), ("いいね", "likes")]
+                  if p == "x" else [("作品", "posts"), ("イラスト", "media"), ("ブックマーク", "likes")])
         for b, (text, key) in zip(self.target_buttons, labels):
             b.setText(text); b.setProperty("key", key)
+        self.target_buttons[1].setVisible(p == "x")
+        if p == "pixiv" and self.selected_target() == "media":
+            self.target_buttons[0].setChecked(True)
         self.url_edit.setPlaceholderText("例: https://x.com/username / @username" if p == "x" else "例: https://www.pixiv.net/users/123456 / 123456")
         if hasattr(self, "chk_hitomi_name"):
             self.chk_hitomi_name.setEnabled(p == "x")
+            self.chk_hitomi_name.setVisible(p == "x")
         self.sync_target_ui()
 
     def pick_destination(self):
@@ -1918,7 +1962,13 @@ class MainWindow(QMainWindow):
         profile = self.current_target_profile(create=False)
         is_x_likes = self.platform_combo.currentData() == "x" and self.selected_target() == "likes"
         is_pixiv_bookmarks = self.platform_combo.currentData() == "pixiv" and self.selected_target() == "likes"
+        range_button = self.range_group.checkedButton() if hasattr(self, "range_group") else None
+        range_mode = str(range_button.property("key")) if range_button else "incremental"
+        if is_pixiv_bookmarks and range_mode == "date":
+            self.range_buttons["incremental"].setChecked(True)
+            range_mode = "incremental"
         if hasattr(self, "likes_baseline_btn"):
+            self.likes_controls.setVisible(is_x_likes)
             self.likes_baseline_btn.setEnabled(is_x_likes and not self.has_pending_likes_job())
             self.likes_anchor_spin.setEnabled(is_x_likes)
             self.likes_probe_spin.setEnabled(is_x_likes)
@@ -1928,22 +1978,41 @@ class MainWindow(QMainWindow):
             elif is_pixiv_bookmarks:
                 incremental_label = "新しいブックマークだけ"
             else:
-                incremental_label = "前回 / 引継ぎ基準以降"
+                incremental_label = "前回の続きから"
             self.range_buttons["incremental"].setText(incremental_label)
+            self.range_buttons["all"].setText("すべて確認")
+            self.range_buttons["date"].setText("投稿日を指定")
+            self.range_buttons["date"].setEnabled(not is_pixiv_bookmarks)
+            self.range_buttons["date"].setToolTip(
+                "ブックマークした日付は取得できないため、この対象では使用できません。"
+                if is_pixiv_bookmarks else "作品・投稿の公開日を基準に絞り込みます。"
+            )
+            self.date_after_edit.setVisible(range_mode == "date")
+        if hasattr(self, "import_btn"):
+            if self.platform_combo.currentData() == "x":
+                self.import_btn.setText("既存のHitomi保存フォルダを引き継ぐ")
+            else:
+                self.import_btn.setText("既存の保存フォルダをこの対象に登録")
+        if hasattr(self, "start_btn"):
+            label = {
+                ("x", "likes"): "⬇ 新しいいいねを取得",
+                ("pixiv", "likes"): "⬇ ブックマークを取得",
+            }.get((self.platform_combo.currentData(), self.selected_target()), "⬇ ダウンロード開始")
+            self.start_btn.setText(label)
         if hasattr(self, "range_note"):
             if is_pixiv_bookmarks:
                 self.range_note.setText(
                     "ブックマーク一覧を新しい順に確認します。作品の投稿日に関係なく、"
-                    "最近ブックマークした作品を取得し、保存済みはarchiveで省きます。"
+                    "最近ブックマークした作品を取得し、保存済みは自動で省きます。"
                 )
             elif self.platform_combo.currentData() == "pixiv":
                 self.range_note.setText(
-                    "pixiv作品の投稿日を前回成功時刻から再確認し、archiveで保存済みを省きます。"
+                    "pixiv作品の投稿日を前回成功時刻から再確認し、保存済みは自動で省きます。"
                 )
             else:
                 self.range_note.setText(
                     "Hitomi引継ぎ済みなら、最新の既存Tweetを初回基準にして10分前から再確認します。"
-                    "archiveで既存分を飛ばすので、基本は続きだけ取得します。"
+                    "保存済みは自動で省くので、基本は続きだけ取得します。"
                 )
         if profile and profile.destination:
             self.dest_edit.setText(profile.destination)
@@ -1982,7 +2051,7 @@ class MainWindow(QMainWindow):
         if profile.indexed_files:
             parts.append(f"既存フォルダ: {profile.indexed_files:,}件を索引済み")
         if profile.imported_archive_entries:
-            parts.append(f"archive: {profile.imported_archive_entries:,}件")
+            parts.append(f"重複防止データ: {profile.imported_archive_entries:,}件")
         if profile.likes_anchor_at:
             parts.append(
                 f"Likesアンカー: {profile.likes_anchor_posts:,}投稿 / 確認済み {profile.likes_seen_posts:,}投稿"
@@ -1993,7 +2062,7 @@ class MainWindow(QMainWindow):
         button = self.range_group.checkedButton() if hasattr(self, "range_group") else None
         mode = str(button.property("key")) if button else "incremental"
         if mode == "all":
-            return "✓ 『すべて』を明示選択中です。既存archiveにあるメディアはスキップしつつ、過去まで走査します。"
+            return "✓ 過去まで確認します。保存済みのメディアは自動でスキップします。"
         if mode == "date":
             value = self.date_after_edit.text().strip() if hasattr(self, "date_after_edit") else ""
             return f"✓ 指定日以降を取得: {value}" if value else "⚠ 『日付以降』の日付を入力してください。"
@@ -2010,7 +2079,7 @@ class MainWindow(QMainWindow):
         if self.platform_combo.currentData() == "pixiv" and self.selected_target() == "likes":
             return (
                 "✓ ブックマーク一覧を新しい順に確認します。作品の投稿日では絞り込まず、"
-                "archiveと既存ファイルで保存済みを省くため、古い作品を最近追加した場合も対象です。"
+                "保存履歴と既存ファイルで保存済みを省くため、古い作品を最近追加した場合も対象です。"
             )
 
         if self.platform_combo.currentData() != "x":

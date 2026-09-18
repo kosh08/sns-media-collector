@@ -273,6 +273,41 @@ class Regressions(unittest.TestCase):
         self.assertIn('作品の投稿日に関係なく', self.w.range_note.text())
         self.assertIn('古い作品を最近追加した場合も対象', self.w.range_status.text())
 
+    def test_download_form_only_shows_controls_relevant_to_the_selected_target(self):
+        self.assertTrue(self.w.likes_controls.isHidden())
+        self.assertTrue(self.w.date_after_edit.isHidden())
+        self.assertTrue(self.w.advanced_panel.isHidden())
+
+        likes = next(button for button in self.w.target_buttons if button.property('key') == 'likes')
+        likes.setChecked(True)
+        self.w.sync_target_ui()
+        self.assertFalse(self.w.likes_controls.isHidden())
+        self.assertEqual(self.w.start_btn.text(), '⬇ 新しいいいねを取得')
+
+        self.w.platform_combo.setCurrentIndex(self.w.platform_combo.findData('pixiv'))
+        likes.setChecked(True)
+        self.w.sync_target_ui()
+        self.assertTrue(self.w.target_buttons[1].isHidden())
+        self.assertTrue(self.w.likes_controls.isHidden())
+        self.assertFalse(self.w.range_buttons['date'].isEnabled())
+        self.assertEqual(self.w.start_btn.text(), '⬇ ブックマークを取得')
+        self.assertEqual(self.w.import_btn.text(), '既存の保存フォルダをこの対象に登録')
+
+        self.w.advanced_toggle.setChecked(True)
+        self.assertFalse(self.w.advanced_panel.isHidden())
+        self.assertEqual(self.w.advanced_toggle.text(), '▼ 詳細設定')
+
+    def test_sidebar_only_shows_login_action_for_selected_service(self):
+        from app import AccountProfile
+        self.w.accounts = [AccountProfile('x-main', 'x'), AccountProfile('pixiv-main', 'pixiv')]
+        self.w.save_accounts(); self.w.refresh_accounts(self.w.accounts[0].profile_id)
+        self.assertFalse(self.w.quick_x_login_btn.isHidden())
+        self.assertTrue(self.w.pixiv_login_btn.isHidden())
+
+        self.w.account_list.setCurrentRow(1)
+        self.assertTrue(self.w.quick_x_login_btn.isHidden())
+        self.assertFalse(self.w.pixiv_login_btn.isHidden())
+
     def test_same_target_can_keep_a_different_destination_per_account(self):
         from app import AccountProfile
         first = AccountProfile('first', 'x')
