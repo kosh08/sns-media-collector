@@ -10,9 +10,10 @@ import time
 import unittest
 from unittest.mock import patch
 import shiboken6
-from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QUrl
+from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
-from app import MainWindow, DownloadJob, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic
+from app import MainWindow, DownloadJob, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 APP = QApplication.instance() or QApplication([])
 OLD = LikeSeenRecord('2086000000000000000', 1)
@@ -380,6 +381,23 @@ class Regressions(unittest.TestCase):
         self.assertIn('--smc-pixiv-stdin', frozen)
         self.assertNotIn('--smc-pixiv-stdin', source)
         self.assertEqual(frozen[-1], 'oauth:pixiv')
+
+    def test_thumbnail_decode_is_limited_to_display_size(self):
+        path = self.root / 'large-preview.png'
+        self.assertTrue(QImage(2400, 1600, QImage.Format_RGB32).save(str(path)))
+        pixmap = scaled_media_pixmap(path, QSize(150, 120))
+        self.assertFalse(pixmap.isNull())
+        self.assertLessEqual(pixmap.width(), 150)
+        self.assertLessEqual(pixmap.height(), 120)
+
+    def test_recent_thumbnail_rebuilds_are_debounced(self):
+        with patch.object(self.w, 'clear_recent_grid') as clear:
+            for _ in range(20):
+                self.w.schedule_recent_downloads_refresh()
+            limit = time.monotonic() + 1.5
+            while clear.call_count == 0 and time.monotonic() < limit:
+                APP.processEvents(); time.sleep(.01)
+        self.assertEqual(clear.call_count, 1)
 
     def test_pixiv_login_dialog_captures_callback_and_uses_isolated_cache(self):
         try:

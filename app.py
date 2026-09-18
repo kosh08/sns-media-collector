@@ -13,8 +13,8 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QThread, QTimer, QUrl, QUrlQuery, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QPixmap
+from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QSize, QThread, QTimer, QUrl, QUrlQuery, Signal
+from PySide6.QtGui import QDesktopServices, QFont, QImageReader, QPixmap
 
 from core import (
     Catalog, LikeSeenRecord, TargetProfile, TargetStore, append_urls, archive_path_for, build_command as core_build_command,
@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.8"
+APP_VERSION = "0.3.9"
 
 
 class UpdateCheckWorker(QThread):
@@ -718,6 +718,17 @@ class AccountDialog(QDialog):
         )
 
 
+def scaled_media_pixmap(path: Path, target_size: QSize) -> QPixmap:
+    """Decode an image near its display size instead of loading it full-size."""
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    source_size = reader.size()
+    if source_size.isValid() and target_size.isValid():
+        reader.setScaledSize(source_size.scaled(target_size, Qt.KeepAspectRatio))
+    image = reader.read()
+    return QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+
+
 class MediaThumbnail(QFrame):
     def __init__(self, info: dict, parent=None):
         super().__init__(parent)
@@ -758,11 +769,9 @@ class MediaThumbnail(QFrame):
     def _load_preview(self):
         suffix = self.path.suffix.lower()
         if self.path.exists() and suffix in {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".gif"}:
-            pix = QPixmap(str(self.path))
+            pix = scaled_media_pixmap(self.path, self.preview.size())
             if not pix.isNull():
-                self.preview.setPixmap(pix.scaled(
-                    self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-                ))
+                self.preview.setPixmap(pix)
                 return
         if suffix in {".mp4", ".webm", ".m4v", ".mov", ".mkv"}:
             self.preview.setText("▶ VIDEO\n" + suffix.lstrip(".").upper())
@@ -808,6 +817,22 @@ def reveal_path_in_file_manager(path: Path | str) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
 
+class MediaSnapshotWorker(QThread):
+    ready = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, root: Path, recursive: bool, parent=None):
+        super().__init__(parent)
+        self.root = Path(root)
+        self.recursive = bool(recursive)
+
+    def run(self):
+        try:
+            self.ready.emit(snapshot_media_files(self.root, recursive=self.recursive))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class DownloadJob(QWidget):
     finished = Signal(object, int)
     file_saved = Signal(object, str)
@@ -850,6 +875,12 @@ class DownloadJob(QWidget):
         self.preexisting_media: dict[str, int] = {}
         self.verification_root: Optional[Path] = None
         self.verification_recursive = False
+        self.snapshot_worker: Optional[MediaSnapshotWorker] = None
+        self._pending_preview_path = ""
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(250)
+        self._preview_timer.timeout.connect(self._flush_file_preview)
 
         layout = QVBoxLayout(self); layout.setContentsMargins(8, 8, 8, 8)
         top = QHBoxLayout()
@@ -879,15 +910,33 @@ class DownloadJob(QWidget):
                 self.verification_root = Path(dest).expanduser()
                 self.verification_root.mkdir(parents=True, exist_ok=True)
                 self.verification_recursive = not bool(ctx.get("direct_folder", True))
-                self.preexisting_media = snapshot_media_files(
-                    self.verification_root, recursive=self.verification_recursive
+                self.status.setText("保存先を確認中…")
+                self.snapshot_worker = MediaSnapshotWorker(
+                    self.verification_root, self.verification_recursive, self
                 )
+                self.snapshot_worker.ready.connect(self._snapshot_ready)
+                self.snapshot_worker.failed.connect(self._snapshot_failed)
+                self.snapshot_worker.start()
+                return
             except Exception as exc:
                 self.verification_error = str(exc)
                 self.output_lines.append(f"[SAVE CHECK ERROR] {exc}")
                 self._finished(-2, QProcess.NormalExit)
                 return
         self.process.start(self.command[0], self.command[1:])
+
+    def _snapshot_ready(self, files):
+        self.preexisting_media = dict(files or {})
+        if self.cancelled:
+            self._finished(-3, QProcess.NormalExit)
+            return
+        self.status.setText("実行中")
+        self.process.start(self.command[0], self.command[1:])
+
+    def _snapshot_failed(self, message: str):
+        self.verification_error = str(message)
+        self.output_lines.append(f"[SAVE CHECK ERROR] {message}")
+        self._finished(-2, QProcess.NormalExit)
 
     def _process_error(self, error):
         if error == QProcess.FailedToStart:
@@ -957,16 +1006,24 @@ class DownloadJob(QWidget):
         path = Path(path_text)
         suffix = path.suffix.lower()
         if path.exists() and suffix in {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".gif"}:
-            pix = QPixmap(str(path))
+            pix = scaled_media_pixmap(path, self.job_preview.size())
             if not pix.isNull():
-                self.job_preview.setPixmap(pix.scaled(
-                    self.job_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-                ))
+                self.job_preview.setPixmap(pix)
                 self.job_preview.setToolTip(str(path))
                 return
         self.job_preview.setPixmap(QPixmap())
         self.job_preview.setText("VIDEO" if suffix in {".mp4", ".webm", ".m4v", ".mov", ".mkv"} else "MEDIA")
         self.job_preview.setToolTip(str(path))
+
+    def _queue_file_preview(self, path_text: str):
+        self._pending_preview_path = str(path_text)
+        self._preview_timer.start()
+
+    def _flush_file_preview(self):
+        path = self._pending_preview_path
+        self._pending_preview_path = ""
+        if path:
+            self._show_file_preview(path)
 
     def _resolve_reported_path(self, path_text: str) -> Path:
         raw = str(path_text).strip().strip('"')
@@ -1001,7 +1058,7 @@ class DownloadJob(QWidget):
             self.verified_file_paths.append(str(path))
             self.files_saved_count = len(self.verified_file_paths)
             self.status.setText(f"ダウンロード中 / 実在確認 {self.files_saved_count:,}件")
-            self._show_file_preview(str(path))
+            self._queue_file_preview(str(path))
             self.file_saved.emit(self, str(path))
             return True
         except OSError:
@@ -1110,7 +1167,8 @@ class DownloadJob(QWidget):
     def _finished(self, code, _status):
         if self.completed:
             return
-        self._read()
+        if self.process.isOpen():
+            self._read()
         self._stdout_buffer += self._stdout_decoder.decode(b"", final=True)
         # Flush a final line that did not end with a newline.
         if self._stdout_buffer:
@@ -1119,6 +1177,8 @@ class DownloadJob(QWidget):
         self.progress.hide()
         self._rate_timer.stop()
         self._reconcile_actual_files()
+        self._preview_timer.stop()
+        self._flush_file_preview()
         self.completed = True
         if self.cancelled:
             code = -3
@@ -1156,6 +1216,10 @@ class MainWindow(QMainWindow):
         self.jobs: list[DownloadJob] = []
         self.active_job: Optional[DownloadJob] = None
         self.last_saved_path: Optional[Path] = None
+        self._recent_refresh_timer = QTimer(self)
+        self._recent_refresh_timer.setSingleShot(True)
+        self._recent_refresh_timer.setInterval(600)
+        self._recent_refresh_timer.timeout.connect(self.refresh_recent_downloads)
         self.update_check_worker: Optional[UpdateCheckWorker] = None
         self.update_download_worker: Optional[UpdateDownloadWorker] = None
         self._update_check_silent = False
@@ -1542,6 +1606,7 @@ class MainWindow(QMainWindow):
     def refresh_recent_downloads(self):
         if not hasattr(self, "recent_grid"):
             return
+        self._recent_refresh_timer.stop()
         self.clear_recent_grid()
         try:
             rows = [r for r in self.catalog.recent_files(24) if Path(str(r.get("path") or "")).exists()]
@@ -1558,6 +1623,10 @@ class MainWindow(QMainWindow):
         except Exception:
             total = len(rows)
         self.recent_count_label.setText(f"表示 {len(rows)}件 / 履歴 {total:,}件")
+
+    def schedule_recent_downloads_refresh(self):
+        """Coalesce bursts of file-save events into one thumbnail rebuild."""
+        self._recent_refresh_timer.start()
 
     def job_file_saved(self, job: DownloadJob, path_text: str):
         ctx = getattr(job, "smc_context", {})
@@ -1582,7 +1651,7 @@ class MainWindow(QMainWindow):
                 self.last_saved_label.setToolTip(str(path))
             self.footer_status.setText(f"実保存 {job.files_saved_count:,}件: {path}")
             self.log.append(f"[SAVED OK] {path} / {size:,} bytes")
-            self.refresh_recent_downloads()
+            self.schedule_recent_downloads_refresh()
         except Exception as exc:
             self.log.append(f"[RECENT ERROR] {path}: {exc}")
 
