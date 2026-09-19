@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.12"
+APP_VERSION = "0.3.13"
 
 
 class UpdateCheckWorker(QThread):
@@ -94,7 +94,13 @@ QLineEdit, QComboBox, QTextEdit, QSpinBox {
     background: #0f1621; border: 1px solid #2a3850; border-radius: 6px;
     padding: 7px; selection-background-color: #2d6cdf;
 }
-QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid #4b83f5; }
+QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 2px solid #5f96ff; padding: 6px; }
+QComboBox QAbstractItemView {
+    background: #121a26; border: 1px solid #354968; outline: none;
+    selection-background-color: #2d6cdf; selection-color: #ffffff;
+}
+QComboBox QAbstractItemView::item { min-height: 30px; padding: 4px 8px; }
+QComboBox QAbstractItemView::item:hover { background: #20395f; }
 QPushButton, QToolButton {
     background: #202a3a; border: 1px solid #31405a; border-radius: 6px;
     padding: 7px 12px;
@@ -105,9 +111,41 @@ QPushButton#primary:hover { background: #3b79ea; }
 QPushButton#danger { background: #672f39; border: 1px solid #8a3f4c; }
 QPushButton:disabled { color: #69758a; background: #171e29; border-color: #263246; }
 QListWidget { background: transparent; border: none; outline: none; }
-QListWidget::item { padding: 9px; border-radius: 6px; }
-QListWidget::item:selected { background: #244b8e; }
-QCheckBox, QRadioButton { spacing: 7px; }
+QListWidget::item {
+    color: #b5c0d2; background: transparent; border: 1px solid transparent;
+    padding: 9px 11px; margin: 2px 0; border-radius: 7px;
+}
+QListWidget::item:hover { color: #ffffff; background: #1b2a40; border-color: #304665; }
+QListWidget::item:selected {
+    color: #ffffff; background: #285aa8; border: 1px solid #74a6ff;
+    font-weight: 700;
+}
+QRadioButton {
+    color: #b7c2d4; background: #111925; border: 1px solid #2c3b52;
+    border-radius: 7px; padding: 8px 12px; spacing: 8px;
+}
+QRadioButton:hover { color: #ffffff; background: #1b2b43; border-color: #4f6f9f; }
+QRadioButton:checked {
+    color: #ffffff; background: #285aa8; border: 2px solid #79a9ff;
+    padding: 7px 11px; font-weight: 700;
+}
+QRadioButton::indicator { width: 14px; height: 14px; }
+QRadioButton::indicator:unchecked {
+    background: #0b111a; border: 2px solid #70809a; border-radius: 8px;
+}
+QRadioButton::indicator:checked {
+    background: #ffffff; border: 4px solid #4f8dff; border-radius: 8px;
+}
+QCheckBox {
+    color: #b7c2d4; background: transparent; border: 1px solid transparent;
+    border-radius: 6px; padding: 5px 7px; spacing: 8px;
+}
+QCheckBox:hover { color: #ffffff; background: #19283d; border-color: #304665; }
+QCheckBox:checked {
+    color: #ffffff; background: #1d3e70; border-color: #4f83ce; font-weight: 600;
+}
+QCheckBox::indicator { width: 15px; height: 15px; }
+QToolButton:checked { color: #ffffff; background: #244f91; border-color: #6096e8; font-weight: 700; }
 QProgressBar { border: 1px solid #2a3850; border-radius: 5px; text-align: center; background: #0f1621; }
 QProgressBar::chunk { background: #2d6cdf; border-radius: 4px; }
 QSplitter::handle { background: #0b1018; }

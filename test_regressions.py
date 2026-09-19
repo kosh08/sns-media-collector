@@ -13,7 +13,7 @@ import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
-from app import MainWindow, DownloadJob, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
+from app import DARK_QSS, MainWindow, DownloadJob, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 APP = QApplication.instance() or QApplication([])
 OLD = LikeSeenRecord('2086000000000000000', 1)
@@ -296,6 +296,15 @@ class Regressions(unittest.TestCase):
         self.w.advanced_toggle.setChecked(True)
         self.assertFalse(self.w.advanced_panel.isHidden())
         self.assertEqual(self.w.advanced_toggle.text(), '▼ 詳細設定')
+
+    def test_selected_controls_have_high_contrast_styles(self):
+        self.assertIn("QRadioButton:checked", DARK_QSS)
+        self.assertIn("background: #285aa8", DARK_QSS)
+        self.assertIn("QListWidget::item:selected", DARK_QSS)
+        self.assertIn("border: 1px solid #74a6ff", DARK_QSS)
+        self.assertIn("QCheckBox:checked", DARK_QSS)
+        self.assertIn("QToolButton:checked", DARK_QSS)
+        self.assertIn("QComboBox QAbstractItemView", DARK_QSS)
 
     def test_sidebar_only_shows_login_action_for_selected_service(self):
         from app import AccountProfile
