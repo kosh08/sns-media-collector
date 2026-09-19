@@ -1,8 +1,8 @@
-SNS Media Collector v0.3.4 validation
+SNS Media Collector v0.3.12 validation
 
 Local validation:
 - Python 3.10 syntax compatibility
-- 61 core/auth/release/updater tests
+- Core/auth/release/updater/install-layout tests
 - 28 Qt/process/SQLite regressions
 - Real gallery-dl save + archive skip test
 - Qt MainWindow startup smoke test
@@ -14,8 +14,9 @@ that one test when optional X11 runtime libraries are unavailable.
 
 Release validation:
 The Windows workflow runs full_test.py before packaging, then verifies the
-frozen app, bundled gallery-dl and updater, installer creation, clean install,
-upgrade, reinstall, installed-app self-test, uninstall, user-data preservation,
+frozen app, bundled gallery-dl, updater and stable launcher, installer creation,
+clean install, two-step upgrade, old-version cleanup, rollback-version retention,
+reinstall, installed-app self-test, uninstall, user-data preservation,
 and SHA-256 generation. A GitHub Release is published only if every step passes.
 The machine-readable result ships beside each installer as release-check.json.
 

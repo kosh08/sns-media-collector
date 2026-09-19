@@ -41,7 +41,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.11"
+APP_VERSION = "0.3.12"
 
 
 class UpdateCheckWorker(QThread):
@@ -2788,7 +2788,10 @@ class MainWindow(QMainWindow):
         installer = Path(installer_text)
         current_dir = Path(sys.executable).resolve().parent
         helper = current_dir / "bin" / "SNSMediaCollectorUpdater.exe"
-        target = current_dir.parent / version / "SNSMediaCollector.exe"
+        # The stable root launcher always resolves the newest installed version.
+        # Existing releases still update safely because the installer also keeps
+        # the versioned executable for rollback.
+        target = current_dir.parent.parent / "SNSMediaCollector.exe"
         if not helper.is_file():
             self.update_button.setText("更新を確認")
             QMessageBox.warning(self, "更新準備", "自動更新プログラムが見つかりません。セットアップを手動で実行します。")

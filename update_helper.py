@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 
+from install_layout import cleanup_old_versions
+
 
 def wait_for_process(pid: int, timeout_ms: int = 120000) -> None:
     if sys.platform != "win32":
@@ -31,6 +33,14 @@ def wait_for_process(pid: int, timeout_ms: int = 120000) -> None:
 def main() -> int:
     if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
         Path(sys.argv[2]).write_text(json.dumps({"success": True}), encoding="utf-8")
+        return 0
+    if len(sys.argv) == 4 and sys.argv[1] == "--cleanup-versions":
+        try:
+            cleanup_old_versions(Path(sys.argv[2]), sys.argv[3], keep_previous=1)
+        except (OSError, ValueError):
+            # Cleanup is best-effort. A locked rollback version must never make an
+            # otherwise successful install unusable.
+            pass
         return 0
     if len(sys.argv) != 4:
         return 2

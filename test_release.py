@@ -23,12 +23,16 @@ class ReleaseTests(unittest.TestCase):
             with patch('build_release.checked', side_effect=write_failed):
                 with self.assertRaises(RuntimeError): build_release.self_test(Path('app.exe'), path)
 
-    def test_installer_only_targets_versioned_application_files(self):
+    def test_installer_uses_stable_shortcuts_and_versioned_application_files(self):
         s=(build_release.ROOT / 'installer/setup.iss').read_text(encoding='utf-8')
         self.assertIn('PrivilegesRequired=lowest', s)
         self.assertIn('AppId=SNSMediaCollector.MasterTools.Desktop', s)
         self.assertIn('AppMutex=' + windows_instance.MUTEX_NAME, s)
         self.assertIn('DestDir: "{app}\\versions\\{#AppVersion}"', s)
+        self.assertIn('DestName: "SNSMediaCollector.exe"', s)
+        self.assertIn('Filename: "{app}\\SNSMediaCollector.exe"', s)
+        self.assertIn('--cleanup-versions', s)
+        self.assertNotIn('Filename: "{app}\\versions\\{#AppVersion}\\SNSMediaCollector.exe"', s)
         self.assertNotIn('[UninstallDelete]', s)
         self.assertNotIn('[InstallDelete]', s)
 
@@ -41,6 +45,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('PySide6.QtWebEngineCore', source)
         self.assertIn('PySide6.QtWebEngineWidgets', source)
         self.assertIn('pixiv_oauth_wait_self_test', source)
+        self.assertIn("ROOT / 'stable_launcher.py'", source)
 
     def test_release_notes_are_used_for_public_release(self):
         workflow=(build_release.ROOT / '.github/workflows/windows-installer.yml').read_text(encoding='utf-8')

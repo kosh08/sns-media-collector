@@ -41,6 +41,16 @@ def helper_self_test(executable: Path, report: Path):
         raise RuntimeError(f'Updater self-test failed: {report}')
 
 
+def launcher_self_test(executable: Path, report: Path, require_target: bool = False):
+    report.unlink(missing_ok=True)
+    checked([executable, '--self-test', report])
+    data = json.loads(report.read_text(encoding='utf-8'))
+    if data.get('success') is not True or data.get('frozen') is not True:
+        raise RuntimeError(f'Stable launcher self-test failed: {report}')
+    if require_target and not data.get('target'):
+        raise RuntimeError(f'Stable launcher did not resolve an installed app: {report}')
+
+
 def pixiv_oauth_wait_self_test(executable: Path):
     """Ensure the frozen gallery-dl sidecar keeps stdin open for pixiv OAuth."""
     process = subprocess.Popen(
@@ -67,9 +77,9 @@ def pixiv_oauth_wait_self_test(executable: Path):
         raise RuntimeError('Frozen gallery-dl did not emit the pixiv OAuth login URL')
 
 
-def compile_setup(compiler: Path, bundle: Path, output: Path, version: str) -> Path:
+def compile_setup(compiler: Path, bundle: Path, launcher: Path, output: Path, version: str) -> Path:
     version = release_version(version)
-    checked([compiler, f'/DAppVersion={version}', f'/DBundleDir={bundle}',
+    checked([compiler, f'/DAppVersion={version}', f'/DBundleDir={bundle}', f'/DLauncherExe={launcher}',
              f'/DOutputDir={output}', ROOT / 'installer' / 'setup.iss'])
     setup = output / f'SNSMediaCollector-Setup-{version}.exe'
     if not setup.is_file():
@@ -77,13 +87,15 @@ def compile_setup(compiler: Path, bundle: Path, output: Path, version: str) -> P
     return setup
 
 
-def verify_installer(compiler: Path, bundle: Path, output: Path, setup: Path, version: str):
+def verify_installer(compiler: Path, bundle: Path, launcher: Path, output: Path, setup: Path, version: str):
     # The fixed installer identity must never overwrite a developer's real install registration.
     if os.environ.get('GITHUB_ACTIONS') != 'true':
         raise RuntimeError('Install/upgrade regression requires a disposable GitHub Actions runner')
     # A baseline installer exercises versioned upgrade paths on an ephemeral runner.
-    baseline_version = '0.0.0'
-    baseline = compile_setup(compiler, bundle, output, baseline_version)
+    oldest_version = '0.0.0'
+    previous_version = '0.0.1'
+    oldest = compile_setup(compiler, bundle, launcher, output, oldest_version)
+    previous = compile_setup(compiler, bundle, launcher, output, previous_version)
     data_dir = Path.home() / 'SNSMediaCollector'
     data_dir.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='smc-install-check-') as temporary:
@@ -94,14 +106,24 @@ def verify_installer(compiler: Path, bundle: Path, output: Path, setup: Path, ve
         original = marker.read_bytes()
         uninstaller = install / 'unins000.exe'
         try:
-            for candidate, label in ((baseline, 'baseline'), (setup, 'upgrade'), (setup, 'reinstall')):
+            for candidate, label in ((oldest, 'oldest'), (previous, 'previous'),
+                                     (setup, 'upgrade'), (setup, 'reinstall')):
                 checked([candidate, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
                          f'/DIR={install}', '/TASKS=', f'/LOG={output / (label + ".log")}'])
                 if marker.read_bytes() != original:
                     raise RuntimeError('Installer modified user data')
             self_test(install / 'versions' / version / 'SNSMediaCollector.exe', output / 'installed-self-test.json')
-            if not (install / 'versions' / baseline_version / 'SNSMediaCollector.exe').exists():
-                raise RuntimeError('Previous version was unexpectedly removed')
+            launcher_self_test(
+                install / 'SNSMediaCollector.exe', output / 'launcher-self-test.json',
+                require_target=True,
+            )
+            if (install / 'versions' / oldest_version).exists():
+                raise RuntimeError('Obsolete version was not removed')
+            if not (install / 'versions' / previous_version / 'SNSMediaCollector.exe').exists():
+                raise RuntimeError('Rollback version was unexpectedly removed')
+            retained = [path.name for path in (install / 'versions').iterdir() if path.is_dir()]
+            if set(retained) != {previous_version, version}:
+                raise RuntimeError(f'Unexpected installed versions remain: {retained}')
         finally:
             try:
                 if uninstaller.exists():
@@ -110,7 +132,8 @@ def verify_installer(compiler: Path, bundle: Path, output: Path, setup: Path, ve
                     raise RuntimeError('Uninstall modified user data')
             finally:
                 marker.unlink(missing_ok=True)
-    baseline.unlink(missing_ok=True)
+    oldest.unlink(missing_ok=True)
+    previous.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -137,6 +160,10 @@ def main() -> int:
                  '--windowed', '--name', 'SNSMediaCollectorUpdater',
                  '--distpath', work / 'updater', '--workpath', work / 'updater-work',
                  '--specpath', work, ROOT / 'update_helper.py'], cwd=ROOT)
+        checked([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
+                 '--windowed', '--name', 'SNSMediaCollectorLauncher',
+                 '--distpath', work / 'stable-launcher', '--workpath', work / 'launcher-work',
+                 '--specpath', work, ROOT / 'stable_launcher.py'], cwd=ROOT)
         bundle = dist / 'SNSMediaCollector'
         (bundle / 'bin').mkdir()
         shutil.copy2(work / 'engine' / 'gallery-dl.exe', bundle / 'bin' / 'gallery-dl.exe')
@@ -147,13 +174,16 @@ def main() -> int:
         compiler = Path(os.environ.get('ISCC_PATH', r'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'))
         if not compiler.is_file():
             raise RuntimeError('Inno Setup 6 is required; set ISCC_PATH if installed elsewhere')
-        setup = compile_setup(compiler, bundle, output, version)
-        verify_installer(compiler, bundle, output, setup, version)
+        stable_launcher = work / 'stable-launcher' / 'SNSMediaCollectorLauncher.exe'
+        launcher_self_test(stable_launcher, output / 'standalone-launcher-self-test.json')
+        setup = compile_setup(compiler, bundle, stable_launcher, output, version)
+        verify_installer(compiler, bundle, stable_launcher, output, setup, version)
         digest = hashlib.sha256(setup.read_bytes()).hexdigest()
         (output / 'SHA256SUMS.txt').write_text(f'{digest}  {setup.name}\n', encoding='ascii')
         (output / 'release-check.json').write_text(json.dumps(dict(
             success=True, version=version, setup=setup.name, sha256=digest,
-            checks=['frozen app', 'updater helper', 'install', 'upgrade', 'reinstall', 'installed app',
+            checks=['frozen app', 'updater helper', 'stable launcher', 'install', 'two-step upgrade',
+                    'old-version cleanup', 'rollback retention', 'reinstall', 'installed app',
                     'uninstall preserves user data']), indent=2), encoding='utf-8')
     return 0
 

@@ -7,6 +7,9 @@
 #ifndef OutputDir
   #error OutputDir is required
 #endif
+#ifndef LauncherExe
+  #error LauncherExe is required
+#endif
 
 [Setup]
 AppId=SNSMediaCollector.MasterTools.Desktop
@@ -25,7 +28,7 @@ OutputBaseFilename=SNSMediaCollector-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\versions\{#AppVersion}\SNSMediaCollector.exe
+UninstallDisplayIcon={app}\SNSMediaCollector.exe
 AppMutex=Local\SNSMediaCollectorDesktop
 CloseApplications=no
 RestartApplications=no
@@ -35,15 +38,14 @@ SetupLogging=yes
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Tasks]
-Name: "desktopicon"; Description: "デスクトップにショートカットを作成"; GroupDescription: "ショートカット:"; Flags: checkedonce
-
 [Files]
 Source: "{#BundleDir}\*"; DestDir: "{app}\versions\{#AppVersion}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#LauncherExe}"; DestDir: "{app}"; DestName: "SNSMediaCollector.exe"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\SNS Media Collector"; Filename: "{app}\versions\{#AppVersion}\SNSMediaCollector.exe"; WorkingDir: "{app}\versions\{#AppVersion}"
-Name: "{userdesktop}\SNS Media Collector"; Filename: "{app}\versions\{#AppVersion}\SNSMediaCollector.exe"; WorkingDir: "{app}\versions\{#AppVersion}"; Tasks: desktopicon
+Name: "{group}\SNS Media Collector"; Filename: "{app}\SNSMediaCollector.exe"; WorkingDir: "{app}"
+Name: "{userdesktop}\SNS Media Collector"; Filename: "{app}\SNSMediaCollector.exe"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\versions\{#AppVersion}\SNSMediaCollector.exe"; Description: "SNS Media Collector を起動"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\versions\{#AppVersion}\bin\SNSMediaCollectorUpdater.exe"; Parameters: "--cleanup-versions ""{app}\versions"" ""{#AppVersion}"""; Flags: runhidden waituntilterminated
+Filename: "{app}\SNSMediaCollector.exe"; Description: "SNS Media Collector を起動"; Flags: nowait postinstall skipifsilent
