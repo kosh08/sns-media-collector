@@ -40,6 +40,15 @@ class AuthStoreTests(unittest.TestCase):
             self.assertNotIn(secret, repr(result))
             self.assertIn(secret, path.read_text())
 
+    def test_inspect_extracts_non_secret_x_user_id_from_twid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "account.txt"
+            write_netscape_cookie_file(path, [
+                BrowserCookie(".x.com", "/", True, 0, "auth_token", "secret"),
+                BrowserCookie(".x.com", "/", True, 0, "twid", "u%3D123456789"),
+            ])
+            self.assertEqual(inspect_netscape_cookie_file(path)["x_user_id"], "123456789")
+
     def test_missing_auth_token_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(ValueError, "auth_token"):
