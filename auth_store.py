@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 from pathlib import Path
 import sqlite3
 import tempfile
 from typing import Iterable
+from urllib.parse import unquote
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ def inspect_netscape_cookie_file(path: Path) -> dict:
     names: set[str] = set()
     domains: set[str] = set()
     lines = 0
+    x_user_id = ""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -95,16 +98,21 @@ def inspect_netscape_cookie_file(path: Path) -> dict:
         parts = raw.split("\t")
         if len(parts) != 7:
             continue
-        domain, _include, _cookie_path, _secure, _expires, name, _value = parts
+        domain, _include, _cookie_path, _secure, _expires, name, value = parts
         lines += 1
         names.add(name)
         domains.add(domain.lower())
+        if name == "twid" and domain.lower().lstrip(".").endswith(("x.com", "twitter.com")):
+            match = re.fullmatch(r"u=(\d+)", unquote(value))
+            if match:
+                x_user_id = match.group(1)
     x_domains = {x for x in domains if x.lstrip(".").endswith(("x.com", "twitter.com"))}
     return {
         "exists": True,
         "valid": lines > 0,
         "x_auth": "auth_token" in names and bool(x_domains),
         "csrf": "ct0" in names,
+        "x_user_id": x_user_id,
         "cookie_count": lines,
         "domains": sorted(x_domains),
         "error": "",
