@@ -1286,7 +1286,18 @@ class MainWindow(QMainWindow):
         self.refresh_engine_status()
         self.refresh_recent_downloads()
         self.restore_session()
-        self.refresh_collections()
+        restored_account_id = ""
+        try:
+            restored_account_id = str(json.loads(str(self.settings.value("last_session", "{}"))).get("account_id") or "")
+        except (ValueError, TypeError, AttributeError):
+            pass
+        initial_collection = next(
+            (x.collection_id for x in self.collection_store.items if x.account_id == self._active_account_id), ""
+        )
+        self.refresh_collections(
+            initial_collection,
+            select_first=not bool(restored_account_id and not initial_collection),
+        )
         if not self._active_account_id:
             idx = self.account_combo.currentData()
             if isinstance(idx, int) and 0 <= idx < len(self.accounts):
@@ -1863,7 +1874,7 @@ class MainWindow(QMainWindow):
             self.account_list.blockSignals(False); self.account_combo.blockSignals(False)
         self.account_combo_changed()
 
-    def refresh_collections(self, selected_id: str = ""):
+    def refresh_collections(self, selected_id: str = "", *, select_first: bool = True):
         if not hasattr(self, "collection_list"):
             return
         selected_id = selected_id or self._active_collection_id
@@ -1878,7 +1889,7 @@ class MainWindow(QMainWindow):
             self.collection_list.addItem(item)
             if collection.collection_id == selected_id:
                 selected_row = row
-        if selected_row < 0 and self.collection_store.items:
+        if selected_row < 0 and self.collection_store.items and select_first:
             selected_row = 0
         self.collection_list.setCurrentRow(selected_row)
         self.collection_list.blockSignals(False)
@@ -1915,12 +1926,14 @@ class MainWindow(QMainWindow):
                 button.setChecked(True); break
         self.content_mode_combo.setCurrentIndex(max(0, self.content_mode_combo.findData(collection.content_mode)))
         self.review_checkbox.setChecked(collection.review_mode == "inbox")
-        self.dest_edit.setText(collection.destination or str(self.data_dir / "Library"))
-        self.text_dest_edit.setText(collection.text_destination or str(Path(self.dest_edit.text()) / "text"))
         range_button = self.range_buttons.get(collection.range_mode, self.range_buttons["incremental"])
         range_button.setChecked(True)
         self.date_after_edit.setText(collection.date_after)
         self.sync_target_ui()
+        # A collection's explicit destinations take precedence over legacy
+        # target_store defaults restored by sync_target_ui().
+        self.dest_edit.setText(collection.destination or str(self.data_dir / "Library"))
+        self.text_dest_edit.setText(collection.text_destination or str(Path(self.dest_edit.text()) / "text"))
 
     def collection_from_current(self, *, name: str, collection_id: str = "") -> CollectionProfile:
         idx = self.account_combo.currentData()
