@@ -17,16 +17,19 @@ from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QSize, 
 from PySide6.QtGui import QDesktopServices, QFont, QImageReader, QPixmap
 
 from core import (
-    Catalog, LikeSeenRecord, TargetProfile, TargetStore, append_urls, archive_path_for, build_command as core_build_command,
+    Catalog, LikeSeenRecord, PostRecord, TargetProfile, TargetStore, append_urls, archive_path_for, build_command as core_build_command,
+    build_x_bookmark_scan_command,
     build_x_likes_anchor_command, build_x_likes_probe_command, find_likes_anchor_boundary,
     import_hitomi_x_archive, import_x_likes_seen_archive, incremental_baseline, iso_utc,
     likes_post_urls, normalize_target, parse_iso, parse_smc_file_line, parse_smc_like_seen_line, parse_smc_x_meta_line,
     redact_command, select_likes_anchor_records, snapshot_media_files, new_media_since_snapshot, normalized_local_path,
     MEDIA_EXTENSIONS, safe_to_advance_download_state, utc_now, atomic_write_json, partition_likes_records,
+    parse_smc_post_line, write_post_markdown,
 )
+from collection_profiles import CollectionProfile, CollectionStore
 
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QInputDialog,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QInputDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QProgressBar,
     QRadioButton, QScrollArea, QSpinBox, QSplitter,
@@ -41,7 +44,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.3.13"
+APP_VERSION = "0.4.0"
 
 
 class UpdateCheckWorker(QThread):
@@ -160,6 +163,8 @@ class AccountProfile:
     platform: str  # x | pixiv
     auth_mode: str = "none"  # none | managed_x | managed_pixiv | cookies_file | browser | pixiv_token
     auth_value: str = ""
+    user_id: str = ""
+    username: str = ""
     profile_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
@@ -1168,7 +1173,7 @@ class DownloadJob(QWidget):
 
     def _consume_output_line(self, line: str):
         line = line.rstrip("\r")
-        if line.startswith(("SMC_META\t", "SMC_LIKE_SEEN\t", "SMC_FILE\t")):
+        if line.startswith(("SMC_META\t", "SMC_LIKE_SEEN\t", "SMC_FILE\t", "SMC_POST\t")):
             self.machine_lines.append(line)
             if line.startswith("SMC_FILE\t"):
                 path = parse_smc_file_line(line)
@@ -1188,6 +1193,9 @@ class DownloadJob(QWidget):
                 self.meta_media_count += 1
                 if not self.files_saved_count:
                     self.status.setText(f"メディア確認中 / {self.meta_media_count:,}件")
+            elif line.startswith("SMC_POST\t"):
+                self.meta_media_count += 1
+                self.status.setText(f"ブックマーク確認中 / {self.meta_media_count:,}投稿")
         else:
             self.output_lines.append(line)
             if len(self.output_lines) > 1000:
@@ -1269,12 +1277,16 @@ class MainWindow(QMainWindow):
             self.account_sessions = saved_workspaces if isinstance(saved_workspaces, dict) else {}
         except (ValueError, TypeError):
             self.account_sessions = {}
+        self.collection_store = CollectionStore(self.data_dir / "collections.json")
+        self.collection_store.migrate_account_sessions(self.accounts, self.account_sessions)
+        self._active_collection_id = ""
 
         self.build_ui()
         self.refresh_accounts()
         self.refresh_engine_status()
         self.refresh_recent_downloads()
         self.restore_session()
+        self.refresh_collections()
         if not self._active_account_id:
             idx = self.account_combo.currentData()
             if isinstance(idx, int) and 0 <= idx < len(self.accounts):
@@ -1417,13 +1429,32 @@ class MainWindow(QMainWindow):
     def build_sidebar(self):
         w = QFrame(); w.setObjectName("sidebar"); w.setMinimumWidth(235)
         l = QVBoxLayout(w); l.setContentsMargins(12, 12, 12, 12)
-        top = QHBoxLayout(); sec = QLabel("アカウント"); sec.setObjectName("section")
-        add = QPushButton("＋ アカウント"); add.clicked.connect(self.add_account)
-        top.addWidget(sec); top.addStretch(); top.addWidget(add); l.addLayout(top)
+        top = QHBoxLayout(); sec = QLabel("取得設定"); sec.setObjectName("section")
+        add_collection = QPushButton("＋ 追加"); add_collection.clicked.connect(self.add_collection)
+        top.addWidget(sec); top.addStretch(); top.addWidget(add_collection); l.addLayout(top)
+        hint = QLabel("ドラッグ＆ドロップで並び替え"); hint.setObjectName("muted"); l.addWidget(hint)
+        self.collection_list = QListWidget()
+        self.collection_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.collection_list.setDefaultDropAction(Qt.MoveAction)
+        self.collection_list.currentRowChanged.connect(self.collection_selected)
+        self.collection_list.model().rowsMoved.connect(lambda *_: self.collection_order_changed())
+        l.addWidget(self.collection_list, 1)
+        collection_actions = QHBoxLayout()
+        save_collection = QPushButton("現在の内容を保存"); save_collection.clicked.connect(self.save_current_collection)
+        delete_collection = QPushButton("削除"); delete_collection.clicked.connect(self.delete_collection)
+        collection_actions.addWidget(save_collection, 1); collection_actions.addWidget(delete_collection)
+        l.addLayout(collection_actions)
+        self.inbox_btn = QPushButton("確認箱  0件")
+        self.inbox_btn.clicked.connect(self.open_review_inbox)
+        l.addWidget(self.inbox_btn)
+        l.addSpacing(12)
+
+        account_top = QHBoxLayout(); account_sec = QLabel("認証アカウント"); account_sec.setObjectName("section")
+        add = QPushButton("＋ 追加"); add.clicked.connect(self.add_account)
+        account_top.addWidget(account_sec); account_top.addStretch(); account_top.addWidget(add); l.addLayout(account_top)
         self.account_list = QListWidget(); self.account_list.currentRowChanged.connect(self.account_selected)
-        l.addWidget(self.account_list, 1)
-        account_actions = QLabel("選択中のアカウント"); account_actions.setObjectName("muted")
-        l.addWidget(account_actions)
+        self.account_list.setMaximumHeight(150)
+        l.addWidget(self.account_list)
         self.quick_x_login_btn = QPushButton("Xへログイン / ログイン更新")
         self.quick_x_login_btn.clicked.connect(self.quick_x_login)
         self.pixiv_login_btn = QPushButton("pixivへログイン / 連携更新")
@@ -1456,6 +1487,10 @@ class MainWindow(QMainWindow):
         account_row.addWidget(self.account_combo, 1); cl.addLayout(account_row)
 
         step_target = QLabel("1. 何を取得する？"); step_target.setObjectName("step"); cl.addWidget(step_target)
+        scope_row = QHBoxLayout(); scope_row.addWidget(QLabel("取得する人"))
+        self.scope_combo = QComboBox(); self.scope_combo.addItem("ログイン中の自分", "self"); self.scope_combo.addItem("別のユーザー", "other")
+        self.scope_combo.currentIndexChanged.connect(self.sync_target_ui)
+        scope_row.addWidget(self.scope_combo, 1); cl.addLayout(scope_row)
         cl.addWidget(QLabel("対象のURL・ユーザー名・pixivユーザーID"))
         self.url_edit = QLineEdit(); self.url_edit.setPlaceholderText("例: https://x.com/username / @username / pixiv user ID")
         self.url_edit.editingFinished.connect(self.sync_target_ui)
@@ -1464,7 +1499,7 @@ class MainWindow(QMainWindow):
         target_row = QHBoxLayout(); target_row.addWidget(QLabel("取得対象"))
         self.target_group = QButtonGroup(self)
         self.target_buttons: list[QRadioButton] = []
-        for text, key in [("投稿全体", "posts"), ("メディア欄", "media"), ("いいね", "likes")]:
+        for text, key in [("投稿全体", "posts"), ("メディア欄", "media"), ("いいね", "likes"), ("ブックマーク", "bookmarks")]:
             b = QRadioButton(text); b.setProperty("key", key); self.target_group.addButton(b); self.target_buttons.append(b); target_row.addWidget(b)
         self.target_buttons[1].setChecked(True); target_row.addStretch(); cl.addLayout(target_row)
         self.target_group.buttonClicked.connect(lambda _b: self.sync_target_ui())
@@ -1519,9 +1554,24 @@ class MainWindow(QMainWindow):
         self.chk_gif = QCheckBox("GIF"); self.chk_gif.setChecked(True)
         media_row.addWidget(self.chk_img); media_row.addWidget(self.chk_video); media_row.addWidget(self.chk_gif); media_row.addStretch(); cl.addLayout(media_row)
 
+        content_row = QHBoxLayout(); content_row.addWidget(QLabel("保存内容"))
+        self.content_mode_combo = QComboBox()
+        self.content_mode_combo.addItem("画像・動画のみ", "images")
+        self.content_mode_combo.addItem("本文＋画像・動画", "text_images")
+        self.content_mode_combo.addItem("本文のみ", "text")
+        content_row.addWidget(self.content_mode_combo, 1)
+        self.review_checkbox = QCheckBox("取得後に確認箱で振り分ける")
+        content_row.addWidget(self.review_checkbox); cl.addLayout(content_row)
+
         dest_row = QHBoxLayout(); dest_row.addWidget(QLabel("保存先"))
         self.dest_edit = QLineEdit(str(self.data_dir / "Library")); dest_row.addWidget(self.dest_edit, 1)
         browse = QPushButton("変更"); browse.clicked.connect(self.pick_destination); dest_row.addWidget(browse); cl.addLayout(dest_row)
+
+        self.text_dest_row = QWidget(); text_dest_layout = QHBoxLayout(self.text_dest_row)
+        text_dest_layout.setContentsMargins(0, 0, 0, 0); text_dest_layout.addWidget(QLabel("本文の保存先"))
+        self.text_dest_edit = QLineEdit(str(self.data_dir / "Library" / "text")); text_dest_layout.addWidget(self.text_dest_edit, 1)
+        text_browse = QPushButton("変更"); text_browse.clicked.connect(self.pick_text_destination); text_dest_layout.addWidget(text_browse)
+        self.text_dest_row.setVisible(False); cl.addWidget(self.text_dest_row)
 
         self.chk_remember_dest = QCheckBox("このアカウント・取得対象の保存先として記憶"); self.chk_remember_dest.setChecked(True)
         cl.addWidget(self.chk_remember_dest)
@@ -1747,6 +1797,15 @@ class MainWindow(QMainWindow):
                     if account.auth_value != expected:
                         account.auth_value = expected
                         changed = True
+                    detected_id = str(inspect_netscape_cookie_file(Path(expected)).get("x_user_id") or "")
+                    if detected_id and account.user_id != detected_id:
+                        account.user_id = detected_id
+                        changed = True
+                elif account.platform == "x" and account.auth_mode == "cookies_file" and account.auth_value:
+                    detected_id = str(inspect_netscape_cookie_file(Path(account.auth_value)).get("x_user_id") or "")
+                    if detected_id and account.user_id != detected_id:
+                        account.user_id = detected_id
+                        changed = True
                 elif account.auth_mode == "managed_pixiv":
                     expected = str(managed_pixiv_cache_path(self.data_dir, account.profile_id))
                     if account.auth_value != expected:
@@ -1804,6 +1863,118 @@ class MainWindow(QMainWindow):
             self.account_list.blockSignals(False); self.account_combo.blockSignals(False)
         self.account_combo_changed()
 
+    def refresh_collections(self, selected_id: str = ""):
+        if not hasattr(self, "collection_list"):
+            return
+        selected_id = selected_id or self._active_collection_id
+        self.collection_list.blockSignals(True)
+        self.collection_list.clear()
+        selected_row = -1
+        for row, collection in enumerate(self.collection_store.items):
+            source = {"posts": "投稿", "media": "メディア", "likes": "いいね", "bookmarks": "ブックマーク"}.get(collection.source, collection.source)
+            item = QListWidgetItem(f"{collection.name}\n  {collection.platform.upper()} · {source}")
+            item.setData(Qt.UserRole, collection.collection_id)
+            item.setToolTip("ドラッグして並び替えできます")
+            self.collection_list.addItem(item)
+            if collection.collection_id == selected_id:
+                selected_row = row
+        if selected_row < 0 and self.collection_store.items:
+            selected_row = 0
+        self.collection_list.setCurrentRow(selected_row)
+        self.collection_list.blockSignals(False)
+        if selected_row >= 0:
+            self.collection_selected(selected_row)
+        self.refresh_inbox_count()
+
+    def collection_order_changed(self):
+        ids = [str(self.collection_list.item(i).data(Qt.UserRole)) for i in range(self.collection_list.count())]
+        self.collection_store.reorder(ids)
+
+    def current_collection(self) -> Optional[CollectionProfile]:
+        item = self.collection_list.currentItem() if hasattr(self, "collection_list") else None
+        return self.collection_store.get(str(item.data(Qt.UserRole))) if item else None
+
+    def collection_selected(self, row: int):
+        if row < 0:
+            return
+        collection = self.current_collection()
+        if not collection:
+            return
+        self._active_collection_id = collection.collection_id
+        account_idx = next((i for i, a in enumerate(self.accounts) if a.profile_id == collection.account_id), -1)
+        combo_idx = self.account_combo.findData(account_idx)
+        if combo_idx >= 0:
+            self.account_combo.setCurrentIndex(combo_idx)
+        pidx = self.platform_combo.findData(collection.platform)
+        if pidx >= 0:
+            self.platform_combo.setCurrentIndex(pidx)
+        self.scope_combo.setCurrentIndex(max(0, self.scope_combo.findData(collection.target_scope)))
+        self.url_edit.setText(collection.target_value)
+        for button in self.target_buttons:
+            if button.property("key") == collection.source:
+                button.setChecked(True); break
+        self.content_mode_combo.setCurrentIndex(max(0, self.content_mode_combo.findData(collection.content_mode)))
+        self.review_checkbox.setChecked(collection.review_mode == "inbox")
+        self.dest_edit.setText(collection.destination or str(self.data_dir / "Library"))
+        self.text_dest_edit.setText(collection.text_destination or str(Path(self.dest_edit.text()) / "text"))
+        range_button = self.range_buttons.get(collection.range_mode, self.range_buttons["incremental"])
+        range_button.setChecked(True)
+        self.date_after_edit.setText(collection.date_after)
+        self.sync_target_ui()
+
+    def collection_from_current(self, *, name: str, collection_id: str = "") -> CollectionProfile:
+        idx = self.account_combo.currentData()
+        if not isinstance(idx, int) or not (0 <= idx < len(self.accounts)):
+            raise ValueError("先に認証アカウントを選択してください。")
+        account = self.accounts[idx]
+        scope = str(self.scope_combo.currentData() or "self")
+        item = CollectionProfile(
+            name=name.strip(), account_id=account.profile_id, platform=str(self.platform_combo.currentData()),
+            source=self.selected_target(), target_scope=scope,
+            target_value=self.url_edit.text().strip() if scope == "other" else "",
+            content_mode=str(self.content_mode_combo.currentData() or "images"),
+            review_mode="inbox" if self.review_checkbox.isChecked() else "auto",
+            destination=self.dest_edit.text().strip(),
+            text_destination=self.text_dest_edit.text().strip() or str(Path(self.dest_edit.text().strip()) / "text"),
+            range_mode=str(self.range_group.checkedButton().property("key")),
+            date_after=self.date_after_edit.text().strip(),
+            collection_id=collection_id or uuid.uuid4().hex,
+        )
+        item.validate()
+        return item
+
+    def add_collection(self):
+        name, ok = QInputDialog.getText(self, "取得設定を追加", "分かりやすい名前（例: 資料用ブックマーク）")
+        if not ok or not name.strip():
+            return
+        try:
+            item = self.collection_store.upsert(self.collection_from_current(name=name))
+            self.refresh_collections(item.collection_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "取得設定", str(exc))
+
+    def save_current_collection(self):
+        current = self.current_collection()
+        if not current:
+            self.add_collection(); return
+        try:
+            item = self.collection_store.upsert(self.collection_from_current(
+                name=current.name, collection_id=current.collection_id,
+            ))
+            self.refresh_collections(item.collection_id)
+            self.footer_status.setText(f"取得設定を保存: {item.name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "取得設定", str(exc))
+
+    def delete_collection(self):
+        current = self.current_collection()
+        if not current:
+            return
+        if QMessageBox.question(self, "取得設定を削除", f"「{current.name}」を削除しますか？") == QMessageBox.Yes:
+            self.collection_store.delete(current.collection_id)
+            self._active_collection_id = ""
+            self.refresh_collections()
+
     def add_account(self):
         d = AccountDialog(self, data_dir=self.data_dir, engine=self.engine_command())
         if d.exec():
@@ -1834,11 +2005,16 @@ class MainWindow(QMainWindow):
                 self,
             )
             if dialog.exec() == QDialog.Accepted:
+                info = inspect_netscape_cookie_file(managed_x_cookie_path(self.data_dir, account.profile_id))
+                detected_id = str(info.get("x_user_id") or "")
+                if detected_id and account.user_id != detected_id:
+                    account.user_id = detected_id
+                    self.save_accounts()
                 self.refresh_accounts(account.profile_id)
                 QMessageBox.information(
                     self,
                     "Xログイン更新完了",
-                    "このアカウント専用Cookieを更新しました。設定し直さず、そのまま取得できます。",
+                    "このアカウント専用Cookieを更新しました。自分のIDも自動で紐付けました。",
                 )
         except Exception as exc:
             QMessageBox.warning(self, "アプリ内Xログイン", str(exc))
@@ -1855,6 +2031,14 @@ class MainWindow(QMainWindow):
     def delete_account(self):
         idx = self.account_list.currentRow()
         if idx < 0 or idx >= len(self.accounts): return
+        used_by = [x.name for x in self.collection_store.items if x.account_id == self.accounts[idx].profile_id]
+        if used_by:
+            QMessageBox.warning(
+                self, "削除できません",
+                "この認証アカウントは次の取得設定で使用中です。先に取得設定を削除または変更してください。\n\n"
+                + "\n".join(used_by),
+            )
+            return
         if QMessageBox.question(self, "削除", f"「{self.accounts[idx].name}」を削除しますか？") == QMessageBox.Yes:
             self.accounts.pop(idx); self.save_accounts(); self.refresh_accounts()
 
@@ -1890,22 +2074,34 @@ class MainWindow(QMainWindow):
 
     def platform_changed(self):
         p = self.platform_combo.currentData()
-        labels = ([("投稿全体", "posts"), ("メディア欄", "media"), ("いいね", "likes")]
-                  if p == "x" else [("作品", "posts"), ("イラスト", "media"), ("ブックマーク", "likes")])
+        labels = ([("投稿全体", "posts"), ("メディア欄", "media"), ("いいね", "likes"), ("ブックマーク", "bookmarks")]
+                  if p == "x" else [("作品", "posts"), ("イラスト", "media"), ("ブックマーク", "likes"), ("", "bookmarks")])
         for b, (text, key) in zip(self.target_buttons, labels):
             b.setText(text); b.setProperty("key", key)
         self.target_buttons[1].setVisible(p == "x")
+        self.target_buttons[3].setVisible(p == "x")
         if p == "pixiv" and self.selected_target() == "media":
             self.target_buttons[0].setChecked(True)
         self.url_edit.setPlaceholderText("例: https://x.com/username / @username" if p == "x" else "例: https://www.pixiv.net/users/123456 / 123456")
         if hasattr(self, "chk_hitomi_name"):
             self.chk_hitomi_name.setEnabled(p == "x")
             self.chk_hitomi_name.setVisible(p == "x")
+        if hasattr(self, "content_mode_combo"):
+            self.content_mode_combo.setEnabled(p == "x")
+            if p == "pixiv": self.content_mode_combo.setCurrentIndex(0)
         self.sync_target_ui()
 
     def pick_destination(self):
         d = QFileDialog.getExistingDirectory(self, "保存先を選択", self.dest_edit.text())
-        if d: self.dest_edit.setText(d)
+        if d:
+            old_default = str(Path(self.dest_edit.text().strip()) / "text")
+            self.dest_edit.setText(d)
+            if not self.text_dest_edit.text().strip() or self.text_dest_edit.text().strip() == old_default:
+                self.text_dest_edit.setText(str(Path(d) / "text"))
+
+    def pick_text_destination(self):
+        d = QFileDialog.getExistingDirectory(self, "本文の保存先を選択", self.text_dest_edit.text())
+        if d: self.text_dest_edit.setText(d)
 
     def index_existing_hitomi_folder(self):
         try:
@@ -1985,7 +2181,21 @@ class MainWindow(QMainWindow):
 
     def current_target(self) -> tuple[str, str, str]:
         platform = self.platform_combo.currentData()
-        return normalize_target(platform, self.url_edit.text(), self.selected_target())
+        target = self.selected_target()
+        if platform == "x" and target == "bookmarks":
+            return normalize_target(platform, "self", target)
+        raw = self.url_edit.text()
+        if self.scope_combo.currentData() == "self":
+            idx = self.account_combo.currentData()
+            if isinstance(idx, int) and 0 <= idx < len(self.accounts):
+                account = self.accounts[idx]
+                if account.user_id:
+                    raw = f"id:{account.user_id}"
+                elif account.username:
+                    raw = account.username
+            if not raw.strip():
+                raise ValueError("ログインから自分のIDをまだ確認できません。Xログインを一度更新してください。")
+        return normalize_target(platform, raw, target)
 
     def current_target_profile(self, create: bool = True) -> Optional[TargetProfile]:
         try:
@@ -2000,6 +2210,18 @@ class MainWindow(QMainWindow):
         profile = self.current_target_profile(create=False)
         is_x_likes = self.platform_combo.currentData() == "x" and self.selected_target() == "likes"
         is_pixiv_bookmarks = self.platform_combo.currentData() == "pixiv" and self.selected_target() == "likes"
+        is_x_bookmarks = self.platform_combo.currentData() == "x" and self.selected_target() == "bookmarks"
+        if hasattr(self, "scope_combo"):
+            self.scope_combo.setEnabled(not is_x_bookmarks)
+            self.url_edit.setEnabled(self.scope_combo.currentData() == "other" and not is_x_bookmarks)
+            self.url_edit.setVisible(self.scope_combo.currentData() == "other" and not is_x_bookmarks)
+        if hasattr(self, "content_mode_combo"):
+            self.content_mode_combo.setEnabled(is_x_bookmarks)
+            self.review_checkbox.setEnabled(is_x_bookmarks)
+            if not is_x_bookmarks:
+                self.content_mode_combo.setCurrentIndex(max(0, self.content_mode_combo.findData("images")))
+                self.review_checkbox.setChecked(False)
+            self.text_dest_row.setVisible(is_x_bookmarks)
         range_button = self.range_group.checkedButton() if hasattr(self, "range_group") else None
         range_mode = str(range_button.property("key")) if range_button else "incremental"
         if is_pixiv_bookmarks and range_mode == "date":
@@ -2034,6 +2256,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "start_btn"):
             label = {
                 ("x", "likes"): "⬇ 新しいいいねを取得",
+                ("x", "bookmarks"): "⬇ ブックマークを確認",
                 ("pixiv", "likes"): "⬇ ブックマークを取得",
             }.get((self.platform_combo.currentData(), self.selected_target()), "⬇ ダウンロード開始")
             self.start_btn.setText(label)
@@ -2406,7 +2629,12 @@ class MainWindow(QMainWindow):
 
     def preview_command(self):
         try:
-            if self.is_x_likes_incremental():
+            if self.platform_combo.currentData() == "x" and self.selected_target() == "bookmarks":
+                _name, mode, value = self.current_auth()
+                cmd = build_x_bookmark_scan_command(self.engine_command(), auth_mode=mode, auth_value=value)
+                safe = redact_command(cmd)
+                self.log.append("[BOOKMARKS] 本文とメディア数だけ先に確認します。画像は振り分け後に取得します。")
+            elif self.is_x_likes_incremental():
                 cmd, _title, _ctx = self.build_likes_probe()
                 safe = redact_command(cmd)
                 self.log.append("[LIKES] 1段目はアンカー探索（DLなし）。アンカー手前の投稿だけ2段目で直接DLします。")
@@ -2420,6 +2648,9 @@ class MainWindow(QMainWindow):
     def enqueue_download(self):
         if not self.engine_available():
             QMessageBox.warning(self, "gallery-dl がありません", "setup_and_run.cmd から起動するか、requirements.txt をインストールしてください。")
+            return
+        if self.platform_combo.currentData() == "x" and self.selected_target() == "bookmarks":
+            self.enqueue_bookmark_scan()
             return
         if self.is_x_likes_incremental():
             self.enqueue_likes_probe()
@@ -2446,6 +2677,128 @@ class MainWindow(QMainWindow):
         self.jobs.append(job); self.queue_layout.addWidget(job)
         self.log.append(f"[QUEUE] {title}\n  {cmd[-1]}")
         if self.active_job is None: self.start_next_job()
+
+    def enqueue_bookmark_scan(self):
+        collection = self.current_collection()
+        if not collection:
+            QMessageBox.warning(self, "取得設定が必要です", "Xブックマークは先に取得設定として保存してください。")
+            return
+        account = next((a for a in self.accounts if a.profile_id == collection.account_id), None)
+        if not account:
+            QMessageBox.warning(self, "認証アカウント", "この取得設定の認証アカウントが見つかりません。")
+            return
+        try:
+            self.ensure_auth_ready(account.auth_mode, account.auth_value)
+            command = build_x_bookmark_scan_command(
+                self.engine_command(), auth_mode=account.auth_mode, auth_value=account.auth_value,
+                max_posts=max(50, self.likes_probe_spin.value()),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Xブックマーク", str(exc)); return
+        job = DownloadJob(f"X / {account.name} / {collection.name} / ブックマーク確認", command)
+        job.smc_context = {
+            "job_kind": "bookmark_scan", "collection_id": collection.collection_id,
+            "login_name": account.name, "account_id": account.profile_id,
+        }
+        self.connect_job(job); self.jobs.append(job); self.queue_layout.addWidget(job)
+        self.log.append("[BOOKMARKS] 最大件数まで本文・画像数を確認します。画像はまだダウンロードしません。")
+        if self.active_job is None: self.start_next_job()
+
+    def queue_bookmark_media(self, collection: CollectionProfile, records: list[PostRecord], choices: dict[str, str]):
+        account = next((a for a in self.accounts if a.profile_id == collection.account_id), None)
+        if not account:
+            raise ValueError("認証アカウントが見つかりません。")
+        destination = Path(collection.destination or self.data_dir / "Library")
+        destination.mkdir(parents=True, exist_ok=True)
+        media_records = [r for r in records if choices.get(r.post_id) in {"images", "text_images"} and r.media_count > 0]
+        immediate = [r for r in records if r not in media_records]
+        for rec in records:
+            choice = choices.get(rec.post_id, "skip")
+            markdown_path = ""
+            if choice in {"text", "text_images"}:
+                markdown_path = str(write_post_markdown(rec, Path(collection.text_destination or destination / "text")))
+            if rec in immediate:
+                self.catalog.set_collection_post_choice(
+                    collection.collection_id, rec.post_id, choice,
+                    state="processed", markdown_path=markdown_path,
+                )
+            else:
+                self.catalog.set_collection_post_choice(
+                    collection.collection_id, rec.post_id, choice,
+                    state="queued", markdown_path=markdown_path,
+                )
+        if not media_records:
+            self.refresh_inbox_count(); return
+        target_key = f"x:bookmarks:{collection.collection_id}"
+        profile = self.target_store.ensure(target_key, "x", collection.name)
+        base = core_build_command(
+            self.engine_command(), platform="x", url=media_records[0].source_url,
+            destination=destination, account_name=account.name,
+            auth_mode=account.auth_mode, auth_value=account.auth_value,
+            archive_scope=f"{target_key}:posts", extensions=self.selected_extensions(),
+            capture_internal_metadata=True, use_archive=True,
+            archive_dir=self.data_dir / "archives", direct_folder=True,
+            range_mode="all", profile=profile, manual_date_after="", overlap_minutes=10,
+            hitomi_compat_x=True, target_type="posts",
+        )
+        command = append_urls(base, [r.source_url for r in media_records])
+        job = DownloadJob(f"X / {account.name} / {collection.name} / 振り分け済みメディア", command)
+        job.smc_context = {
+            "job_kind": "bookmark_download", "collection_id": collection.collection_id,
+            "bookmark_post_ids": [r.post_id for r in media_records], "platform": "x",
+            "target_key": target_key, "target_name": collection.name, "target_type": "bookmarks",
+            "destination": str(destination), "login_name": account.name,
+            "started_at": iso_utc(utc_now()), "started_epoch": time.time(),
+            "hitomi_compat": True, "direct_folder": True,
+        }
+        self.connect_job(job); self.jobs.append(job); self.queue_layout.addWidget(job)
+        if self.active_job is None: self.start_next_job()
+
+    def refresh_inbox_count(self):
+        if hasattr(self, "inbox_btn"):
+            count = self.catalog.pending_collection_post_count()
+            self.inbox_btn.setText(f"確認箱  {count:,}件")
+            self.inbox_btn.setEnabled(count > 0)
+
+    def open_review_inbox(self):
+        collection = self.current_collection()
+        if not collection:
+            return
+        records = self.catalog.collection_posts(collection.collection_id, state="pending")
+        if not records:
+            QMessageBox.information(self, "確認箱", "この取得設定に未振り分けの投稿はありません。"); return
+        dialog = QDialog(self); dialog.setWindowTitle(f"確認箱 — {collection.name}"); dialog.resize(820, 650)
+        layout = QVBoxLayout(dialog)
+        note = QLabel("投稿ごとに保存方法を選べます。上の一括指定も後から個別変更できます。")
+        note.setWordWrap(True); layout.addWidget(note)
+        bulk = QComboBox()
+        for text, key in [("一括指定なし", ""), ("すべて本文＋画像", "text_images"), ("すべて画像のみ", "images"), ("すべて本文のみ", "text"), ("すべてスキップ", "skip")]:
+            bulk.addItem(text, key)
+        layout.addWidget(bulk)
+        holder = QWidget(); rows = QVBoxLayout(holder); selectors = {}
+        for rec in records:
+            frame = QFrame(); frame.setObjectName("card"); row = QVBoxLayout(frame)
+            title = QLabel(f"@{rec.author_name or rec.author_id}  ·  画像/動画 {rec.media_count}件")
+            title.setObjectName("section"); row.addWidget(title)
+            text = QLabel(rec.content or "（本文なし）"); text.setWordWrap(True); text.setTextInteractionFlags(Qt.TextSelectableByMouse); row.addWidget(text)
+            select = QComboBox()
+            for label, key in [("本文＋画像", "text_images"), ("画像のみ", "images"), ("本文のみ", "text"), ("スキップ", "skip")]:
+                select.addItem(label, key)
+            select.setCurrentIndex(max(0, select.findData(collection.content_mode)))
+            row.addWidget(select); selectors[rec.post_id] = select; rows.addWidget(frame)
+        rows.addStretch()
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(holder); layout.addWidget(scroll, 1)
+        bulk.currentIndexChanged.connect(lambda _i: [s.setCurrentIndex(s.findData(bulk.currentData())) for s in selectors.values() if bulk.currentData()])
+        actions = QHBoxLayout(); cancel = QPushButton("閉じる"); apply_btn = QPushButton("振り分けを実行"); apply_btn.setObjectName("primary")
+        cancel.clicked.connect(dialog.reject); apply_btn.clicked.connect(dialog.accept)
+        actions.addStretch(); actions.addWidget(cancel); actions.addWidget(apply_btn); layout.addLayout(actions)
+        if dialog.exec() == QDialog.Accepted:
+            try:
+                choices = {post_id: str(combo.currentData()) for post_id, combo in selectors.items()}
+                self.queue_bookmark_media(collection, records, choices)
+                self.refresh_inbox_count()
+            except Exception as exc:
+                QMessageBox.warning(self, "振り分け", str(exc))
 
     def start_next_job(self):
         if self._closing:
@@ -2490,6 +2843,49 @@ class MainWindow(QMainWindow):
         self.log.append(f"[{'OK' if logical_ok else 'ERROR'}] {job.title}")
         for line in job.output_lines[-80:]:
             self.log.append(line)
+
+        if ctx.get("job_kind") == "bookmark_scan":
+            collection = self.collection_store.get(ctx.get("collection_id", ""))
+            try:
+                if not logical_ok or not collection:
+                    raise ValueError("ブックマーク確認が失敗・中断しました。")
+                records = [rec for line in job.machine_lines if (rec := parse_smc_post_line(line))]
+                known = self.catalog.collection_post_ids(collection.collection_id)
+                new_records = [r for r in records if r.post_id not in known]
+                result = self.catalog.upsert_collection_posts(
+                    collection.collection_id, new_records,
+                    pending=collection.review_mode == "inbox",
+                )
+                self.log.append(
+                    f"[BOOKMARKS OK] 確認 {len(records):,}投稿 / 新規 {result['added']:,}投稿"
+                )
+                if collection.review_mode == "inbox":
+                    job.status.setText(f"確認箱へ {result['added']:,}投稿")
+                    self.refresh_inbox_count()
+                elif new_records:
+                    choices = {r.post_id: collection.content_mode for r in new_records}
+                    self.queue_bookmark_media(collection, new_records, choices)
+                    job.status.setText(f"自動振り分け {len(new_records):,}投稿")
+                else:
+                    job.status.setText("新規ブックマークなし")
+            except Exception as exc:
+                job.status.setText("ブックマーク確認エラー")
+                self.log.append(f"[BOOKMARKS ERROR] {exc}")
+            self.active_job = None; self.start_next_job(); return
+
+        if ctx.get("job_kind") == "bookmark_download":
+            state = "processed" if logical_ok else "pending"
+            for post_id in ctx.get("bookmark_post_ids", []):
+                row = self.catalog.conn.execute(
+                    "SELECT choice,markdown_path FROM collection_posts WHERE collection_id=? AND post_id=?",
+                    (ctx.get("collection_id", ""), post_id),
+                ).fetchone()
+                if row:
+                    self.catalog.set_collection_post_choice(
+                        ctx.get("collection_id", ""), post_id, row[0] or "images",
+                        state=state, markdown_path=row[1] or "",
+                    )
+            self.refresh_inbox_count()
 
         if job.reported_file_paths or job.verified_file_paths:
             self.log.append(
