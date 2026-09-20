@@ -501,6 +501,21 @@ def build_x_bookmark_scan_command(
     return cmd
 
 
+def find_bookmark_boundary(records: Iterable[PostRecord], known_post_ids: Iterable[str]) -> dict:
+    """Return only records before the first known bookmark; never leap over a missing boundary."""
+    items = list(records)
+    known = {str(x) for x in known_post_ids if str(x)}
+    if not known:
+        return {"found": True, "first_run": True, "records": items, "anchor_post_id": ""}
+    for index, record in enumerate(items):
+        if record.post_id in known:
+            return {
+                "found": True, "first_run": False,
+                "records": items[:index], "anchor_post_id": record.post_id,
+            }
+    return {"found": False, "first_run": False, "records": [], "anchor_post_id": ""}
+
+
 def write_post_markdown(record: PostRecord, destination: Path) -> Path:
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
