@@ -18,7 +18,7 @@ from PySide6.QtGui import QDesktopServices, QFont, QImageReader, QPixmap
 
 from core import (
     Catalog, LikeSeenRecord, PostRecord, TargetProfile, TargetStore, append_urls, archive_path_for, build_command as core_build_command,
-    build_x_bookmark_scan_command,
+    build_x_bookmark_scan_command, find_bookmark_boundary,
     build_x_likes_anchor_command, build_x_likes_probe_command, find_likes_anchor_boundary,
     import_hitomi_x_archive, import_x_likes_seen_archive, incremental_baseline, iso_utc,
     likes_post_urls, normalize_target, parse_iso, parse_smc_file_line, parse_smc_like_seen_line, parse_smc_x_meta_line,
@@ -2851,7 +2851,13 @@ class MainWindow(QMainWindow):
                     raise ValueError("ブックマーク確認が失敗・中断しました。")
                 records = [rec for line in job.machine_lines if (rec := parse_smc_post_line(line))]
                 known = self.catalog.collection_post_ids(collection.collection_id)
-                new_records = [r for r in records if r.post_id not in known]
+                boundary = find_bookmark_boundary(records, known)
+                if not boundary["found"]:
+                    raise ValueError(
+                        "探索上限内で前回のブックマーク境界を検出できませんでした。"
+                        "取りこぼし防止のため今回は追加せず、探索上限を増やして再確認してください。"
+                    )
+                new_records = list(boundary["records"])
                 result = self.catalog.upsert_collection_posts(
                     collection.collection_id, new_records,
                     pending=collection.review_mode == "inbox",
