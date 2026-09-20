@@ -33,6 +33,7 @@ X_ARCHIVE_FORMAT = "{tweet_id}_{num}"
 SMC_META_PREFIX = "SMC_META\t"
 SMC_LIKE_SEEN_PREFIX = "SMC_LIKE_SEEN\t"
 SMC_FILE_PREFIX = "SMC_FILE\t"
+SMC_POST_PREFIX = "SMC_POST\t"
 SMC_X_META_FORMAT = (
     "prepare:SMC_META\t{tweet_id}\t{author[id]}\t{author[name]}\t"
     "{date:%Y-%m-%dT%H:%M:%S%z}\t{num}\t{extension}"
@@ -44,6 +45,11 @@ SMC_LIKE_SEEN_FORMAT = (
 # Emitted only after a file has been successfully handled by gallery-dl.
 # This powers Hitomi-style live thumbnails without writing sidecar files.
 SMC_FILE_FORMAT = "after:SMC_FILE\t{_path}"
+SMC_POST_FORMAT = (
+    "directory:SMC_POST\t{tweet_id}\t{author[id]}\t{author[name]!j}\t"
+    "{date:%Y-%m-%dT%H:%M:%S%z}\t{date_bookmarked:%Y-%m-%dT%H:%M:%S%z}\t"
+    "{content!j}\t{count}"
+)
 
 
 def atomic_write_json(path: Path, value) -> None:
@@ -442,6 +448,88 @@ class LikeSeenRecord:
     extension: str = ""
 
 
+@dataclass(frozen=True)
+class PostRecord:
+    post_id: str
+    author_id: str = ""
+    author_name: str = ""
+    post_date: str = ""
+    collected_date: str = ""
+    content: str = ""
+    media_count: int = 0
+
+    @property
+    def source_url(self) -> str:
+        name = self.author_name.strip()
+        if re.fullmatch(r"[A-Za-z0-9_]{1,15}", name):
+            return f"https://x.com/{name}/status/{self.post_id}"
+        return f"https://x.com/i/status/{self.post_id}"
+
+
+def parse_smc_post_line(line: str) -> Optional[PostRecord]:
+    if not line.startswith(SMC_POST_PREFIX):
+        return None
+    parts = line.rstrip("\r\n").split("\t")
+    if len(parts) != 8 or parts[0] != "SMC_POST":
+        return None
+    _, post_id, author_id, author_json, post_date, collected_date, content_json, media_count = parts
+    try:
+        int(post_id)
+        author_name = json.loads(author_json)
+        content = json.loads(content_json)
+        count = max(0, int(media_count or 0))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(author_name, str) or not isinstance(content, str):
+        return None
+    return PostRecord(post_id, author_id, author_name, post_date, collected_date, content, count)
+
+
+def build_x_bookmark_scan_command(
+    engine: list[str], *, auth_mode: str, auth_value: str, max_posts: int = 300,
+) -> list[str]:
+    """Collect bookmark metadata, including text-only posts, without media downloads."""
+    limit = max(10, int(max_posts))
+    cmd = list(engine) + ["--windows-filenames", "--no-input"]
+    _append_auth(cmd, "x", auth_mode, auth_value)
+    cmd += [
+        "-o", "extractor.twitter.text-tweets=true",
+        "--post-range", f"1-{limit}",
+        "--print", SMC_POST_FORMAT,
+        "--no-download", "https://x.com/i/bookmarks",
+    ]
+    return cmd
+
+
+def write_post_markdown(record: PostRecord, destination: Path) -> Path:
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    stamp = (record.collected_date or record.post_date or "undated")[:10]
+    safe_stamp = re.sub(r"[^0-9-]", "", stamp) or "undated"
+    path = destination / f"[{safe_stamp}] {record.post_id}.md"
+    body = (
+        f"# @{record.author_name or record.author_id or 'unknown'}\n\n"
+        f"- 元投稿: {record.source_url}\n"
+        f"- 投稿日時: {record.post_date or '不明'}\n"
+        f"- ブックマーク日時: {record.collected_date or '不明'}\n\n"
+        f"{record.content.strip()}\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".tmp", delete=False) as f:
+            temporary = Path(f.name)
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return path
+
+
 def partition_likes_records(records: Iterable[LikeSeenRecord], archive_path: Optional[Path],
                             *, destination: Optional[Path] = None,
                             hitomi_compat: bool = False) -> tuple[list[LikeSeenRecord], list[LikeSeenRecord]]:
@@ -704,6 +792,14 @@ def normalize_target(platform: str, raw: str, target: str) -> tuple[str, str, st
         raise ValueError("URL / ユーザー名 / IDを入力してください。")
 
     if platform == "x":
+        if target == "bookmarks":
+            return "https://x.com/i/bookmarks", "x:self:bookmarks", "自分のブックマーク"
+        m_id = re.fullmatch(r"id:(\d+)", s, re.I)
+        if m_id:
+            uid = m_id.group(1)
+            base = f"https://x.com/id:{uid}"
+            url = base + ({"media": "/media", "likes": "/likes"}.get(target, ""))
+            return url, f"x:id:{uid}", f"id:{uid}"
         m_status = re.search(
             r"(?:x\.com|twitter\.com)/([^/?#]+)/status/(\d+)", s, re.I
         )
@@ -1024,12 +1120,101 @@ class Catalog:
             );
             CREATE INDEX IF NOT EXISTS idx_recent_files_detected
               ON recent_files(detected_at DESC);
+
+            CREATE TABLE IF NOT EXISTS collection_posts (
+              collection_id TEXT NOT NULL,
+              post_id TEXT NOT NULL,
+              author_id TEXT,
+              author_name TEXT,
+              post_date TEXT,
+              collected_date TEXT,
+              content TEXT,
+              media_count INTEGER NOT NULL DEFAULT 0,
+              source_url TEXT,
+              state TEXT NOT NULL DEFAULT 'pending',
+              choice TEXT NOT NULL DEFAULT '',
+              markdown_path TEXT NOT NULL DEFAULT '',
+              first_seen_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(collection_id, post_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_collection_posts_state
+              ON collection_posts(collection_id, state, collected_date DESC, post_id DESC);
             """
         )
         self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
+
+    def upsert_collection_posts(
+        self, collection_id: str, records: Iterable[PostRecord], *, pending: bool = True,
+    ) -> dict:
+        now = iso_utc(utc_now())
+        unique = {r.post_id: r for r in records}
+        added = 0
+        with self.conn:
+            for rec in unique.values():
+                exists = self.conn.execute(
+                    "SELECT 1 FROM collection_posts WHERE collection_id=? AND post_id=?",
+                    (collection_id, rec.post_id),
+                ).fetchone()
+                if not exists:
+                    added += 1
+                self.conn.execute(
+                    """INSERT INTO collection_posts(
+                         collection_id,post_id,author_id,author_name,post_date,collected_date,
+                         content,media_count,source_url,state,first_seen_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(collection_id,post_id) DO UPDATE SET
+                         author_id=excluded.author_id,author_name=excluded.author_name,
+                         post_date=excluded.post_date,collected_date=excluded.collected_date,
+                         content=excluded.content,media_count=excluded.media_count,
+                         source_url=excluded.source_url,updated_at=excluded.updated_at""",
+                    (
+                        collection_id, rec.post_id, rec.author_id, rec.author_name,
+                        rec.post_date, rec.collected_date, rec.content, rec.media_count,
+                        rec.source_url, "pending" if pending else "ready", now, now,
+                    ),
+                )
+        return {"scanned": len(unique), "added": added}
+
+    def collection_posts(self, collection_id: str, *, state: str = "pending", limit: int = 500) -> list[PostRecord]:
+        rows = self.conn.execute(
+            """SELECT post_id,author_id,author_name,post_date,collected_date,content,media_count
+               FROM collection_posts WHERE collection_id=? AND state=?
+               ORDER BY collected_date DESC, post_id DESC LIMIT ?""",
+            (collection_id, state, max(1, int(limit))),
+        ).fetchall()
+        return [PostRecord(*row) for row in rows]
+
+    def collection_post_ids(self, collection_id: str) -> set[str]:
+        return {str(row[0]) for row in self.conn.execute(
+            "SELECT post_id FROM collection_posts WHERE collection_id=?", (collection_id,)
+        )}
+
+    def set_collection_post_choice(
+        self, collection_id: str, post_id: str, choice: str, *,
+        state: str = "processed", markdown_path: str = "",
+    ) -> None:
+        if choice not in {"images", "text_images", "text", "skip"}:
+            raise ValueError("invalid post choice")
+        with self.conn:
+            self.conn.execute(
+                """UPDATE collection_posts SET choice=?,state=?,markdown_path=?,updated_at=?
+                   WHERE collection_id=? AND post_id=?""",
+                (choice, state, markdown_path, iso_utc(utc_now()), collection_id, post_id),
+            )
+
+    def pending_collection_post_count(self, collection_id: str = "") -> int:
+        if collection_id:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM collection_posts WHERE collection_id=? AND state='pending'",
+                (collection_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(*) FROM collection_posts WHERE state='pending'").fetchone()
+        return int(row[0] or 0)
 
     def upsert_x_event(
         self,
