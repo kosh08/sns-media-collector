@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from collection_profiles import CollectionProfile, CollectionStore
-from core import Catalog, PostRecord, build_x_bookmark_scan_command, parse_smc_post_line, write_post_markdown
+from core import Catalog, PostRecord, build_x_bookmark_scan_command, find_bookmark_boundary, parse_smc_post_line, write_post_markdown
 
 
 class CollectionProfileTests(unittest.TestCase):
@@ -32,6 +32,20 @@ class CollectionProfileTests(unittest.TestCase):
 
 
 class BookmarkTests(unittest.TestCase):
+    def records(self):
+        return [PostRecord(str(100 + i), content=f"post {i}") for i in range(3)]
+
+    def test_bookmark_boundary_zero_one_and_multiple_new(self):
+        records = self.records()
+        self.assertEqual(find_bookmark_boundary(records, {"100"})["records"], [])
+        self.assertEqual(find_bookmark_boundary(records, {"101"})["records"], records[:1])
+        self.assertEqual(find_bookmark_boundary(records, {"102"})["records"], records[:2])
+
+    def test_bookmark_missing_boundary_is_safe_stop(self):
+        got = find_bookmark_boundary(self.records(), {"999"})
+        self.assertFalse(got["found"])
+        self.assertEqual(got["records"], [])
+
     def test_parse_bookmark_metadata_with_json_escaped_text(self):
         line = 'SMC_POST\t1234567890123456789\t42\t"name"\t2026-01-02T03:04:05+0000\t2026-02-03T04:05:06+0000\t"hello\\nworld"\t2'
         rec = parse_smc_post_line(line)
