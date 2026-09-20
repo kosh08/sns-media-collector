@@ -15,6 +15,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 from app import DARK_QSS, MainWindow, DownloadJob, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
+from collection_profiles import CollectionProfile
 APP = QApplication.instance() or QApplication([])
 OLD = LikeSeenRecord('2086000000000000000', 1)
 NEW = LikeSeenRecord('2086100000000000000', 1, '123', 'someone', '2026-08-09T09:00:00+0000', 'jpg')
@@ -520,4 +521,37 @@ class Regressions(unittest.TestCase):
 
     def test_test_settings_do_not_use_user_registry(self):
         self.assertEqual(Path(self.w.settings.fileName()), self.root / 'settings.ini')
+
+    def test_self_collection_uses_cookie_identity_without_duplicate_handle(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '自分のメディア', account.profile_id, 'x', source='media', target_scope='self',
+            destination=str(self.root / 'media'),
+        ))
+        self.w.refresh_collections(collection.collection_id)
+        url, key, _name = self.w.current_target()
+        self.assertEqual(url, 'https://x.com/id:123456789/media')
+        self.assertEqual(key, 'x:id:123456789')
+        self.assertFalse(self.w.url_edit.isVisible())
+
+    def test_bookmark_scan_enters_persistent_review_inbox(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '資料', account.profile_id, 'x', source='bookmarks', review_mode='inbox',
+            destination=str(self.root / 'media'),
+        ))
+        self.w.refresh_collections(collection.collection_id)
+        job = DownloadJob('bookmark', [sys.executable])
+        job.smc_context = {'job_kind': 'bookmark_scan', 'collection_id': collection.collection_id}
+        job.machine_lines = [
+            'SMC_POST\t1234567890123456789\t42\t"artist"\t2026-01-02T03:04:05+0000\t'
+            '2026-02-03T04:05:06+0000\t"memo"\t1'
+        ]
+        self.w.job_finished(job, 0)
+        self.assertEqual(self.w.catalog.pending_collection_post_count(collection.collection_id), 1)
+        self.assertIn('1件', self.w.inbox_btn.text())
 if __name__ == '__main__': unittest.main(verbosity=2)
