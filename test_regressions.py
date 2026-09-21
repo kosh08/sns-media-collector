@@ -13,7 +13,7 @@ import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
-from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
+from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, resolved_test_data_dir, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 from collection_profiles import CollectionProfile
 APP = QApplication.instance() or QApplication([])
@@ -373,6 +373,22 @@ class Regressions(unittest.TestCase):
         self.assertEqual(self.w.collection_store.items[0].text_destination, str(self.root / 'Library' / 'text'))
         self.assertEqual(self.w.account_sessions['account']['destination'], expected)
         self.assertEqual(json.loads(str(self.w.settings.value('last_session')))['destination'], expected)
+
+    def test_packaged_normal_launch_ignores_test_data_override(self):
+        with patch.object(sys, 'frozen', True, create=True):
+            with patch.dict(os.environ, {
+                'SMC_TEST_DATA_DIR': str(self.root),
+                'SMC_PACKAGED_SELF_TEST': '',
+            }):
+                self.assertEqual(resolved_test_data_dir(), '')
+
+            with patch.dict(os.environ, {
+                'SMC_TEST_DATA_DIR': str(self.root),
+                'SMC_PACKAGED_SELF_TEST': '1',
+            }):
+                self.assertEqual(resolved_test_data_dir(), str(self.root))
+
+        self.assertEqual(resolved_test_data_dir(), str(self.root))
 
     def test_sidebar_only_shows_login_action_for_selected_service(self):
         from app import AccountProfile

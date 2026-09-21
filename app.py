@@ -44,7 +44,17 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
+
+
+def resolved_test_data_dir() -> str:
+    """Allow test-data isolation in source tests and explicit packaged self-tests only."""
+    value = os.environ.get("SMC_TEST_DATA_DIR", "").strip()
+    if not value:
+        return ""
+    if getattr(sys, "frozen", False) and os.environ.get("SMC_PACKAGED_SELF_TEST") != "1":
+        return ""
+    return value
 
 
 def is_ephemeral_test_path(value: str | Path) -> bool:
@@ -1314,7 +1324,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME}  {APP_VERSION}")
         self.resize(1440, 900)
         self._closing = False
-        test_data_dir = os.environ.get("SMC_TEST_DATA_DIR", "").strip()
+        test_data_dir = resolved_test_data_dir()
         self.settings = (QSettings(str(Path(test_data_dir) / "settings.ini"), QSettings.IniFormat)
                          if test_data_dir else QSettings("MasterTools", APP_NAME))
         self.data_dir = Path(test_data_dir) if test_data_dir else Path(self.settings.value("data_dir", str(Path.home() / "SNSMediaCollector")))

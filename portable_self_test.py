@@ -13,12 +13,14 @@ import traceback
 def run(output: str) -> int:
     report = {'success': False, 'frozen': bool(getattr(sys, 'frozen', False)), 'checks': []}
     old_data = os.environ.get('SMC_TEST_DATA_DIR')
+    old_packaged_test = os.environ.get('SMC_PACKAGED_SELF_TEST')
     old_qt = os.environ.get('QT_QPA_PLATFORM')
     window = None
     try:
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         with tempfile.TemporaryDirectory(prefix='smc-portable-check-') as temporary:
             os.environ['SMC_TEST_DATA_DIR'] = temporary
+            os.environ['SMC_PACKAGED_SELF_TEST'] = '1'
             from PySide6.QtWidgets import QApplication
             from PySide6.QtGui import QPixmap
             from app import MainWindow, APP_VERSION
@@ -68,7 +70,11 @@ def run(output: str) -> int:
     except Exception:
         report['error'] = traceback.format_exc()
     finally:
-        for key, previous in [('SMC_TEST_DATA_DIR', old_data), ('QT_QPA_PLATFORM', old_qt)]:
+        for key, previous in [
+            ('SMC_TEST_DATA_DIR', old_data),
+            ('SMC_PACKAGED_SELF_TEST', old_packaged_test),
+            ('QT_QPA_PLATFORM', old_qt),
+        ]:
             if previous is None:
                 os.environ.pop(key, None)
             else:
