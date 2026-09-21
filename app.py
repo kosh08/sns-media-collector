@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QSize, QThread, QTimer, QUrl, QUrlQuery, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QImageReader, QPixmap
+from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QImageReader, QPixmap
 
 from core import (
     Catalog, LikeSeenRecord, PostRecord, TargetProfile, TargetStore, append_urls, archive_path_for, build_command as core_build_command,
@@ -44,7 +44,24 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"
+
+
+def is_ephemeral_test_path(value: str | Path) -> bool:
+    """Recognize our own disposable test destinations without matching normal folders."""
+    normalized = str(value or "").strip().replace("\\", "/").lower()
+    if not normalized:
+        return False
+    in_temp = (
+        "/appdata/local/temp/" in normalized
+        or "/windows/temp/" in normalized
+        or normalized.startswith("/tmp/")
+    )
+    marker = re.search(
+        r"(?:^|/)(?:smc-(?:smoke|regression|portable-check|release-build|install-check)-)[^/]+",
+        normalized,
+    )
+    return bool(in_temp and marker)
 
 
 class UpdateCheckWorker(QThread):
@@ -797,6 +814,28 @@ def scaled_media_pixmap(path: Path, target_size: QSize) -> QPixmap:
     return QPixmap.fromImage(image) if not image.isNull() else QPixmap()
 
 
+class ElidedLabel(QLabel):
+    """One-line label that keeps both filename start and extension visible."""
+    def __init__(self, text: str = "", parent=None):
+        super().__init__("", parent)
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self._refresh_elision()
+
+    def setFullText(self, text: str):
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self._refresh_elision()
+
+    def _refresh_elision(self):
+        width = max(1, self.contentsRect().width())
+        QLabel.setText(self, QFontMetrics(self.font()).elidedText(self._full_text, Qt.ElideMiddle, width))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_elision()
+
+
 class MediaThumbnail(QFrame):
     def __init__(self, info: dict, parent=None):
         super().__init__(parent)
@@ -817,9 +856,9 @@ class MediaThumbnail(QFrame):
         layout.addWidget(self.preview)
 
         name = self.path.name or "(unknown)"
-        self.name_label = QLabel(name)
+        self.name_label = ElidedLabel(name)
+        self.name_label.setFixedWidth(150)
         self.name_label.setWordWrap(False)
-        self.name_label.setToolTip(name)
         layout.addWidget(self.name_label)
 
         detail_parts = []
@@ -1303,6 +1342,7 @@ class MainWindow(QMainWindow):
             self.account_sessions = {}
         self.collection_store = CollectionStore(self.data_dir / "collections.json")
         self.collection_store.migrate_account_sessions(self.accounts, self.account_sessions)
+        self._settings_repair_count = 0 if test_data_dir else self.repair_ephemeral_test_paths()
         self._active_collection_id = ""
 
         self.build_ui()
@@ -1310,6 +1350,11 @@ class MainWindow(QMainWindow):
         self.refresh_engine_status()
         self.refresh_recent_downloads()
         self.restore_session()
+        if self._settings_repair_count:
+            self.log.append(
+                f"[SETTINGS REPAIR] 検証用の一時保存先を {self._settings_repair_count} 箇所修復しました。"
+            )
+            self.footer_status.setText("検証用の一時保存先を通常の保存先へ戻しました")
         restored_account_id = ""
         try:
             restored_account_id = str(json.loads(str(self.settings.value("last_session", "{}"))).get("account_id") or "")
@@ -1346,6 +1391,60 @@ class MainWindow(QMainWindow):
         return {name: getattr(self, name) for name in (
             "chk_direct_folder", "chk_remember_dest", "chk_archive", "chk_internal_meta",
             "chk_hitomi_name", "chk_img", "chk_video", "chk_gif")}
+
+    def repair_ephemeral_test_paths(self) -> int:
+        """Remove leaked CI/smoke-test destinations while preserving real user paths."""
+        repaired = 0
+        default_media = str(self.data_dir / "Library")
+        default_text = str(self.data_dir / "Library" / "text")
+
+        target_changed = False
+        for profile in self.target_store.all():
+            if is_ephemeral_test_path(profile.destination):
+                profile.destination = default_media
+                target_changed = True
+                repaired += 1
+            if is_ephemeral_test_path(profile.hitomi_source_folder):
+                profile.hitomi_source_folder = ""
+                target_changed = True
+                repaired += 1
+        if target_changed:
+            self.target_store.save()
+
+        collection_changed = False
+        for collection in self.collection_store.items:
+            if is_ephemeral_test_path(collection.destination):
+                collection.destination = default_media
+                collection_changed = True
+                repaired += 1
+            if is_ephemeral_test_path(collection.text_destination):
+                collection.text_destination = default_text
+                collection_changed = True
+                repaired += 1
+        if collection_changed:
+            self.collection_store.save()
+
+        session_changed = False
+        for state in self.account_sessions.values():
+            if isinstance(state, dict) and is_ephemeral_test_path(state.get("destination", "")):
+                state["destination"] = default_media
+                session_changed = True
+                repaired += 1
+        if session_changed:
+            self.settings.setValue("account_sessions", json.dumps(self.account_sessions, ensure_ascii=False))
+
+        try:
+            last_session = json.loads(str(self.settings.value("last_session", "{}")))
+        except (ValueError, TypeError):
+            last_session = {}
+        if isinstance(last_session, dict) and is_ephemeral_test_path(last_session.get("destination", "")):
+            last_session["destination"] = default_media
+            self.settings.setValue("last_session", json.dumps(last_session, ensure_ascii=False))
+            session_changed = True
+            repaired += 1
+        if session_changed:
+            self.settings.sync()
+        return repaired
 
     def save_session(self):
         idx = self.account_combo.currentData()
@@ -1847,9 +1946,10 @@ class MainWindow(QMainWindow):
             if hasattr(self, "reveal_last_btn"):
                 self.reveal_last_btn.setEnabled(True)
             if hasattr(self, "last_saved_label"):
-                self.last_saved_label.setText(f"今回の実保存: {path}")
+                self.last_saved_label.setText(f"今回の実保存: {path.name}")
                 self.last_saved_label.setToolTip(str(path))
-            self.footer_status.setText(f"実保存 {job.files_saved_count:,}件: {path}")
+            self.footer_status.setText(f"実保存 {job.files_saved_count:,}件: {path.name}")
+            self.footer_status.setToolTip(str(path))
             self.log.append(f"[SAVED OK] {path} / {size:,} bytes")
             self.schedule_recent_downloads_refresh()
         except Exception as exc:

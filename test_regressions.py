@@ -13,7 +13,7 @@ import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
-from app import DARK_QSS, MainWindow, DownloadJob, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
+from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 from collection_profiles import CollectionProfile
 APP = QApplication.instance() or QApplication([])
@@ -340,6 +340,39 @@ class Regressions(unittest.TestCase):
         self.w.connect_job(DownloadJob('queued', [sys.executable, '-c', 'pass']))
         self.assertTrue(self.w.queue_empty_label.isHidden())
         self.assertFalse(self.w.queue_scroll.isHidden())
+
+    def test_long_filename_is_elided_without_losing_full_tooltip(self):
+        name = 'とても長い日本語ファイル名_' + ('1234567890' * 8) + '_p0.jpg'
+        label = ElidedLabel(name)
+        label.resize(150, 24)
+        APP.processEvents()
+        self.assertIn('…', label.text())
+        self.assertNotEqual(label.text(), name)
+        self.assertEqual(label.toolTip(), name)
+        label.close()
+
+    def test_ephemeral_smoke_destination_is_repaired_but_user_temp_path_is_kept(self):
+        bad = r'C:\Users\SampleUser\AppData\Local\Temp\smc-smoke-example\Library'
+        good = r'C:\Users\SampleUser\AppData\Local\Temp\personal-downloads'
+        self.assertTrue(is_ephemeral_test_path(bad))
+        self.assertFalse(is_ephemeral_test_path(good))
+
+        profile = self.w.target_store.ensure('x:test', 'x', 'test')
+        profile.destination = bad
+        self.w.collection_store.items = [CollectionProfile(
+            name='test', account_id='account', platform='x', destination=bad,
+            text_destination=bad + r'\text',
+        )]
+        self.w.account_sessions = {'account': {'destination': bad}}
+        self.w.settings.setValue('last_session', json.dumps({'destination': bad}))
+
+        self.assertEqual(self.w.repair_ephemeral_test_paths(), 5)
+        expected = str(self.root / 'Library')
+        self.assertEqual(profile.destination, expected)
+        self.assertEqual(self.w.collection_store.items[0].destination, expected)
+        self.assertEqual(self.w.collection_store.items[0].text_destination, str(self.root / 'Library' / 'text'))
+        self.assertEqual(self.w.account_sessions['account']['destination'], expected)
+        self.assertEqual(json.loads(str(self.w.settings.value('last_session')))['destination'], expected)
 
     def test_sidebar_only_shows_login_action_for_selected_service(self):
         from app import AccountProfile
