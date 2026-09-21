@@ -44,7 +44,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 
 
 class UpdateCheckWorker(QThread):
@@ -83,16 +83,30 @@ class UpdateDownloadWorker(QThread):
 
 
 DARK_QSS = r"""
-QWidget { background: #0f141d; color: #e9eef7; font-size: 13px; }
-QMainWindow { background: #0b1018; }
-QFrame#card { background: #151c27; border: 1px solid #263246; border-radius: 10px; }
-QFrame#sidebar { background: #101722; border-right: 1px solid #273246; }
+QWidget { background: transparent; color: #e9eef7; font-size: 13px; }
+QMainWindow, QDialog { background: #090e15; }
+QLabel { background: transparent; }
+QFrame#appHeader { background: #0c121b; border-bottom: 1px solid #222e40; }
+QFrame#appFooter { background: #0c121b; border-top: 1px solid #222e40; }
+QFrame#card { background: #141c27; border: 1px solid #263449; border-radius: 12px; }
+QFrame#card QLabel { background-color: transparent; }
+QFrame#sidebar { background: #0f1620; border-right: 1px solid #253146; }
+QFrame#queueSidebar { background: #0f1620; border-left: 1px solid #253146; }
+QFrame#sideSection { background: #131c28; border: 1px solid #263449; border-radius: 10px; }
 QFrame#thumb { background: #101722; border: 1px solid #263246; border-radius: 8px; }
 QFrame#thumb:hover { border: 1px solid #4b83f5; }
-QLabel#title { font-size: 20px; font-weight: 700; }
+QLabel#title { font-size: 20px; font-weight: 700; color: #f5f8ff; }
+QLabel#editorTitle { font-size: 18px; font-weight: 700; color: #ffffff; }
 QLabel#muted { color: #8f9bb0; }
-QLabel#section { font-weight: 700; font-size: 14px; }
-QLabel#step { color: #8db5ff; font-weight: 700; font-size: 13px; padding-top: 4px; }
+QLabel#section { font-weight: 700; font-size: 14px; color: #f4f7fc; }
+QLabel#step {
+    color: #b8d1ff; background: #17243a; border-left: 3px solid #6096ef;
+    border-radius: 4px; font-weight: 700; font-size: 13px; padding: 7px 10px;
+}
+QLabel#statusPill {
+    color: #99e6bc; background: #123124; border: 1px solid #245b43;
+    border-radius: 10px; padding: 3px 9px; font-weight: 600;
+}
 QLineEdit, QComboBox, QTextEdit, QSpinBox {
     background: #0f1621; border: 1px solid #2a3850; border-radius: 6px;
     padding: 7px; selection-background-color: #2d6cdf;
@@ -112,15 +126,22 @@ QPushButton:hover, QToolButton:hover { background: #29364a; }
 QPushButton#primary { background: #2d6cdf; border: 1px solid #427ef0; font-weight: 700; }
 QPushButton#primary:hover { background: #3b79ea; }
 QPushButton#danger { background: #672f39; border: 1px solid #8a3f4c; }
+QPushButton#ghost { background: transparent; border-color: #2a3850; color: #aebbd0; }
+QPushButton#ghost:hover { background: #1a2638; color: #ffffff; }
+QPushButton#inbox {
+    background: #1d3151; border: 1px solid #3d6399; color: #dceaff;
+    font-weight: 700; text-align: left; padding: 9px 12px;
+}
+QPushButton#inbox:hover { background: #25436f; }
 QPushButton:disabled { color: #69758a; background: #171e29; border-color: #263246; }
 QListWidget { background: transparent; border: none; outline: none; }
 QListWidget::item {
-    color: #b5c0d2; background: transparent; border: 1px solid transparent;
-    padding: 9px 11px; margin: 2px 0; border-radius: 7px;
+    color: #b8c3d5; background: transparent; border: 1px solid transparent;
+    padding: 10px 11px; margin: 3px 0; border-radius: 7px;
 }
 QListWidget::item:hover { color: #ffffff; background: #1b2a40; border-color: #304665; }
 QListWidget::item:selected {
-    color: #ffffff; background: #285aa8; border: 1px solid #74a6ff;
+    color: #ffffff; background: #244f91; border: 1px solid #79a9ff;
     font-weight: 700;
 }
 QRadioButton {
@@ -148,10 +169,13 @@ QCheckBox:checked {
     color: #ffffff; background: #1d3e70; border-color: #4f83ce; font-weight: 600;
 }
 QCheckBox::indicator { width: 15px; height: 15px; }
+QToolButton#disclosure { background: transparent; border: none; color: #aebbd0; text-align: left; padding: 6px 2px; }
+QToolButton#disclosure:hover { color: #ffffff; background: transparent; }
+QToolButton#disclosure:checked { color: #dce9ff; background: transparent; border: none; font-weight: 700; }
 QToolButton:checked { color: #ffffff; background: #244f91; border-color: #6096e8; font-weight: 700; }
 QProgressBar { border: 1px solid #2a3850; border-radius: 5px; text-align: center; background: #0f1621; }
 QProgressBar::chunk { background: #2d6cdf; border-radius: 4px; }
-QSplitter::handle { background: #0b1018; }
+QSplitter::handle { background: #090e15; width: 5px; }
 QScrollBar:vertical { background: #101722; width: 10px; margin: 0px; }
 QScrollBar::handle:vertical { background: #35445f; min-height: 28px; border-radius: 5px; }
 """
@@ -1409,10 +1433,10 @@ class MainWindow(QMainWindow):
         root = QWidget(); self.setCentralWidget(root)
         layout = QVBoxLayout(root); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
 
-        header = QFrame(); header.setFixedHeight(66)
+        header = QFrame(); header.setObjectName("appHeader"); header.setFixedHeight(66)
         hl = QHBoxLayout(header); hl.setContentsMargins(18, 8, 18, 8)
         titles = QVBoxLayout(); t = QLabel(APP_NAME); t.setObjectName("title")
-        sub = QLabel(f"X / Twitter & pixiv メディア収集クライアント — v{APP_VERSION}"); sub.setObjectName("muted")
+        sub = QLabel(f"保存した取得設定から、X / Twitter と pixiv をすばやく収集 — v{APP_VERSION}"); sub.setObjectName("muted")
         titles.addWidget(t); titles.addWidget(sub); hl.addLayout(titles); hl.addStretch()
         self.engine_badge = QLabel("gallery-dl: 確認中…"); self.engine_badge.setObjectName("muted")
         hl.addWidget(self.engine_badge)
@@ -1422,11 +1446,11 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.build_sidebar())
         splitter.addWidget(self.build_center())
         splitter.addWidget(self.build_queue())
-        splitter.setSizes([260, 790, 390])
+        splitter.setSizes([275, 875, 290])
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
 
-        footer = QFrame(); footer.setFixedHeight(36)
+        footer = QFrame(); footer.setObjectName("appFooter"); footer.setFixedHeight(36)
         fl = QHBoxLayout(footer); fl.setContentsMargins(16, 4, 16, 4)
         self.footer_status = QLabel("準備完了"); self.footer_status.setObjectName("muted")
         fl.addWidget(self.footer_status); fl.addStretch()
@@ -1438,53 +1462,88 @@ class MainWindow(QMainWindow):
         layout.addWidget(footer)
 
     def build_sidebar(self):
-        w = QFrame(); w.setObjectName("sidebar"); w.setMinimumWidth(235)
-        l = QVBoxLayout(w); l.setContentsMargins(12, 12, 12, 12)
-        top = QHBoxLayout(); sec = QLabel("取得設定"); sec.setObjectName("section")
-        add_collection = QPushButton("＋ 追加"); add_collection.clicked.connect(self.add_collection)
-        top.addWidget(sec); top.addStretch(); top.addWidget(add_collection); l.addLayout(top)
-        hint = QLabel("ドラッグ＆ドロップで並び替え"); hint.setObjectName("muted"); l.addWidget(hint)
+        w = QFrame(); w.setObjectName("sidebar"); w.setMinimumWidth(250)
+        l = QVBoxLayout(w); l.setContentsMargins(12, 12, 12, 12); l.setSpacing(10)
+
+        collection_section = QFrame(); collection_section.setObjectName("sideSection")
+        collection_box = QVBoxLayout(collection_section); collection_box.setContentsMargins(11, 11, 11, 11); collection_box.setSpacing(7)
+        top = QHBoxLayout(); sec = QLabel("取得メニュー"); sec.setObjectName("section")
+        add_collection = QPushButton("＋ 新規"); add_collection.clicked.connect(self.add_collection)
+        top.addWidget(sec); top.addStretch(); top.addWidget(add_collection); collection_box.addLayout(top)
+        hint = QLabel("選択すると中央に設定内容を表示します"); hint.setObjectName("muted"); hint.setWordWrap(True); collection_box.addWidget(hint)
         self.collection_list = QListWidget()
         self.collection_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.collection_list.setDefaultDropAction(Qt.MoveAction)
         self.collection_list.currentRowChanged.connect(self.collection_selected)
         self.collection_list.model().rowsMoved.connect(lambda *_: self.collection_order_changed())
-        l.addWidget(self.collection_list, 1)
+        collection_box.addWidget(self.collection_list, 1)
         collection_actions = QHBoxLayout()
-        save_collection = QPushButton("現在の内容を保存"); save_collection.clicked.connect(self.save_current_collection)
-        delete_collection = QPushButton("削除"); delete_collection.clicked.connect(self.delete_collection)
-        collection_actions.addWidget(save_collection, 1); collection_actions.addWidget(delete_collection)
-        l.addLayout(collection_actions)
+        self.save_collection_btn = QPushButton("変更を保存"); self.save_collection_btn.setObjectName("primary")
+        self.save_collection_btn.clicked.connect(self.save_current_collection)
+        delete_collection = QPushButton("削除"); delete_collection.setObjectName("ghost"); delete_collection.clicked.connect(self.delete_collection)
+        collection_actions.addWidget(self.save_collection_btn, 1); collection_actions.addWidget(delete_collection)
+        collection_box.addLayout(collection_actions)
         self.inbox_btn = QPushButton("確認箱  0件")
+        self.inbox_btn.setObjectName("inbox")
         self.inbox_btn.clicked.connect(self.open_review_inbox)
-        l.addWidget(self.inbox_btn)
-        l.addSpacing(12)
+        collection_box.addWidget(self.inbox_btn)
+        l.addWidget(collection_section, 1)
 
-        account_top = QHBoxLayout(); account_sec = QLabel("認証アカウント"); account_sec.setObjectName("section")
+        self.auth_toggle = QToolButton()
+        self.auth_toggle.setObjectName("disclosure")
+        self.auth_toggle.setCheckable(True)
+        self.auth_toggle.setChecked(not bool(self.accounts))
+        self.auth_toggle.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.auth_toggle.toggled.connect(self.toggle_auth_panel)
+        l.addWidget(self.auth_toggle)
+
+        self.auth_panel = QFrame(); self.auth_panel.setObjectName("sideSection")
+        account_box = QVBoxLayout(self.auth_panel); account_box.setContentsMargins(11, 10, 11, 11); account_box.setSpacing(7)
+        account_top = QHBoxLayout(); account_sec = QLabel("ログインアカウント"); account_sec.setObjectName("section")
         add = QPushButton("＋ 追加"); add.clicked.connect(self.add_account)
-        account_top.addWidget(account_sec); account_top.addStretch(); account_top.addWidget(add); l.addLayout(account_top)
+        account_top.addWidget(account_sec); account_top.addStretch(); account_top.addWidget(add); account_box.addLayout(account_top)
         self.account_list = QListWidget(); self.account_list.currentRowChanged.connect(self.account_selected)
-        self.account_list.setMaximumHeight(150)
-        l.addWidget(self.account_list)
-        self.quick_x_login_btn = QPushButton("Xへログイン / ログイン更新")
+        self.account_list.setMaximumHeight(140)
+        account_box.addWidget(self.account_list)
+        self.quick_x_login_btn = QPushButton("Xのログインを更新")
         self.quick_x_login_btn.clicked.connect(self.quick_x_login)
-        self.pixiv_login_btn = QPushButton("pixivへログイン / 連携更新")
+        self.pixiv_login_btn = QPushButton("pixivの連携を更新")
         self.pixiv_login_btn.clicked.connect(self.start_pixiv_oauth)
-        self.edit_account_btn = QPushButton("アカウント設定を編集"); self.edit_account_btn.clicked.connect(self.edit_account)
-        self.delete_account_btn = QPushButton("アカウントを削除"); self.delete_account_btn.clicked.connect(self.delete_account)
-        l.addWidget(self.quick_x_login_btn); l.addWidget(self.pixiv_login_btn)
-        l.addWidget(self.edit_account_btn); l.addWidget(self.delete_account_btn)
-        l.addSpacing(10)
+        self.edit_account_btn = QPushButton("設定を編集"); self.edit_account_btn.clicked.connect(self.edit_account)
+        self.delete_account_btn = QPushButton("削除"); self.delete_account_btn.setObjectName("ghost"); self.delete_account_btn.clicked.connect(self.delete_account)
+        account_box.addWidget(self.quick_x_login_btn); account_box.addWidget(self.pixiv_login_btn)
+        account_actions = QHBoxLayout(); account_actions.addWidget(self.edit_account_btn, 1); account_actions.addWidget(self.delete_account_btn)
+        account_box.addLayout(account_actions)
+        l.addWidget(self.auth_panel)
+        self.toggle_auth_panel(self.auth_toggle.isChecked())
+
         open_data = QPushButton("データフォルダを開く"); open_data.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir))))
+        open_data.setObjectName("ghost")
         l.addWidget(open_data)
         return w
+
+    def toggle_auth_panel(self, expanded: bool):
+        if hasattr(self, "auth_panel"):
+            self.auth_panel.setVisible(expanded)
+        count = len(self.accounts)
+        arrow = "▼" if expanded else "▶"
+        if hasattr(self, "auth_toggle"):
+            self.auth_toggle.setText(f"{arrow}  ログイン管理  ·  {count}件")
 
     def build_center(self):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame)
         content = QWidget(); l = QVBoxLayout(content); l.setContentsMargins(14, 12, 14, 12); l.setSpacing(12)
 
         card = QFrame(); card.setObjectName("card"); cl = QVBoxLayout(card); cl.setContentsMargins(18, 18, 18, 18); cl.setSpacing(12)
-        sec = QLabel("ダウンロード設定"); sec.setObjectName("section"); cl.addWidget(sec)
+        heading = QHBoxLayout()
+        heading_text = QVBoxLayout(); heading_text.setSpacing(2)
+        self.editor_title = QLabel("取得内容を設定"); self.editor_title.setObjectName("editorTitle")
+        self.editor_subtitle = QLabel("左の取得メニューを選ぶか、新しい内容を設定してください"); self.editor_subtitle.setObjectName("muted")
+        heading_text.addWidget(self.editor_title); heading_text.addWidget(self.editor_subtitle)
+        heading.addLayout(heading_text, 1)
+        self.editor_state = QLabel("未保存"); self.editor_state.setObjectName("statusPill")
+        heading.addWidget(self.editor_state, 0, Qt.AlignTop)
+        cl.addLayout(heading)
 
         step_account = QLabel("使用するアカウント"); step_account.setObjectName("step"); cl.addWidget(step_account)
 
@@ -1653,13 +1712,17 @@ class MainWindow(QMainWindow):
         return scroll
 
     def build_queue(self):
-        w = QFrame(); w.setObjectName("sidebar"); w.setMinimumWidth(340)
+        w = QFrame(); w.setObjectName("queueSidebar"); w.setMinimumWidth(270)
         l = QVBoxLayout(w); l.setContentsMargins(12, 12, 12, 12)
-        row = QHBoxLayout(); sec = QLabel("ダウンロードキュー"); sec.setObjectName("section"); row.addWidget(sec); row.addStretch()
+        row = QHBoxLayout(); sec = QLabel("処理状況"); sec.setObjectName("section"); row.addWidget(sec); row.addStretch()
         stop = QPushButton("停止"); stop.setObjectName("danger"); stop.clicked.connect(self.stop_active); row.addWidget(stop); l.addLayout(row)
+        self.queue_empty_label = QLabel("待機中の処理はありません\n\n取得を開始すると、進行状況がここに表示されます。")
+        self.queue_empty_label.setObjectName("muted"); self.queue_empty_label.setWordWrap(True); self.queue_empty_label.setAlignment(Qt.AlignCenter)
+        l.addWidget(self.queue_empty_label, 1)
         self.queue_layout = QVBoxLayout(); self.queue_layout.setAlignment(Qt.AlignTop)
         holder = QWidget(); holder.setLayout(self.queue_layout)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame); scroll.setWidget(holder)
+        self.queue_scroll = scroll; self.queue_scroll.setVisible(False)
         l.addWidget(scroll, 1)
         return w
 
@@ -1795,6 +1858,10 @@ class MainWindow(QMainWindow):
     def connect_job(self, job: DownloadJob):
         job.finished.connect(self.job_finished)
         job.file_saved.connect(self.job_file_saved)
+        if hasattr(self, "queue_empty_label"):
+            self.queue_empty_label.setVisible(False)
+        if hasattr(self, "queue_scroll"):
+            self.queue_scroll.setVisible(True)
         return job
 
     def load_accounts(self) -> list[AccountProfile]:
@@ -1872,6 +1939,7 @@ class MainWindow(QMainWindow):
             self.account_list.setCurrentRow(selected)
         finally:
             self.account_list.blockSignals(False); self.account_combo.blockSignals(False)
+        self.toggle_auth_panel(self.auth_toggle.isChecked())
         self.account_combo_changed()
 
     def refresh_collections(self, selected_id: str = "", *, select_first: bool = True):
@@ -1884,6 +1952,7 @@ class MainWindow(QMainWindow):
         for row, collection in enumerate(self.collection_store.items):
             source = {"posts": "投稿", "media": "メディア", "likes": "いいね", "bookmarks": "ブックマーク"}.get(collection.source, collection.source)
             item = QListWidgetItem(f"{collection.name}\n  {collection.platform.upper()} · {source}")
+            item.setSizeHint(QSize(0, 52))
             item.setData(Qt.UserRole, collection.collection_id)
             item.setToolTip("ドラッグして並び替えできます")
             self.collection_list.addItem(item)
@@ -1895,7 +1964,34 @@ class MainWindow(QMainWindow):
         self.collection_list.blockSignals(False)
         if selected_row >= 0:
             self.collection_selected(selected_row)
+        else:
+            self.refresh_editor_heading()
         self.refresh_inbox_count()
+
+    def refresh_editor_heading(self):
+        if not hasattr(self, "editor_title"):
+            return
+        collection = self.current_collection()
+        if not collection:
+            self.editor_title.setText("取得内容を設定")
+            self.editor_subtitle.setText("左の取得メニューを選ぶか、新しい内容を設定してください")
+            self.editor_state.setText("新規")
+            return
+        if collection.source == "likes":
+            source = "ブックマーク" if collection.platform == "pixiv" else "いいね"
+        else:
+            source = {"posts": "投稿", "media": "メディア", "bookmarks": "ブックマーク"}.get(
+                collection.source, collection.source
+            )
+        account = next((a for a in self.accounts if a.profile_id == collection.account_id), None)
+        account_name = account.name if account else "認証アカウント未設定"
+        mode = "確認箱へ" if collection.review_mode == "inbox" else "自動保存"
+        service = "X" if collection.platform == "x" else "pixiv"
+        self.editor_title.setText(collection.name)
+        self.editor_subtitle.setText(
+            f"{service} · {source}  /  {account_name}  /  {mode}"
+        )
+        self.editor_state.setText("選択中")
 
     def collection_order_changed(self):
         ids = [str(self.collection_list.item(i).data(Qt.UserRole)) for i in range(self.collection_list.count())]
@@ -1907,6 +2003,7 @@ class MainWindow(QMainWindow):
 
     def collection_selected(self, row: int):
         if row < 0:
+            self.refresh_editor_heading()
             return
         collection = self.current_collection()
         if not collection:
@@ -1934,6 +2031,7 @@ class MainWindow(QMainWindow):
         # target_store defaults restored by sync_target_ui().
         self.dest_edit.setText(collection.destination or str(self.data_dir / "Library"))
         self.text_dest_edit.setText(collection.text_destination or str(Path(self.dest_edit.text()) / "text"))
+        self.refresh_editor_heading()
 
     def collection_from_current(self, *, name: str, collection_id: str = "") -> CollectionProfile:
         idx = self.account_combo.currentData()

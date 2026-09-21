@@ -302,10 +302,44 @@ class Regressions(unittest.TestCase):
         self.assertIn("QRadioButton:checked", DARK_QSS)
         self.assertIn("background: #285aa8", DARK_QSS)
         self.assertIn("QListWidget::item:selected", DARK_QSS)
-        self.assertIn("border: 1px solid #74a6ff", DARK_QSS)
+        self.assertIn("border: 1px solid #79a9ff", DARK_QSS)
         self.assertIn("QCheckBox:checked", DARK_QSS)
         self.assertIn("QToolButton:checked", DARK_QSS)
         self.assertIn("QComboBox QAbstractItemView", DARK_QSS)
+
+    def test_visual_hierarchy_keeps_login_management_collapsible(self):
+        self.assertFalse(self.w.auth_panel.isHidden())
+        self.w.auth_toggle.setChecked(False)
+        self.assertTrue(self.w.auth_panel.isHidden())
+        self.assertIn('▶', self.w.auth_toggle.text())
+        self.w.auth_toggle.setChecked(True)
+        self.assertFalse(self.w.auth_panel.isHidden())
+        self.assertIn('▼', self.w.auth_toggle.text())
+
+    def test_selected_collection_is_named_in_editor_heading(self):
+        from app import AccountProfile
+        account = AccountProfile('x-main', 'x')
+        self.w.accounts = [account]
+        self.w.refresh_accounts(account.profile_id)
+        collection = CollectionProfile(
+            name='資料用ブックマーク', account_id=account.profile_id, platform='x',
+            source='bookmarks', target_scope='self', target_value='',
+            content_mode='text_images', review_mode='inbox',
+            destination=str(self.root / 'media'), text_destination=str(self.root / 'text'),
+        )
+        self.w.collection_store.items = [collection]
+        self.w.refresh_collections(collection.collection_id)
+        self.assertEqual(self.w.editor_title.text(), '資料用ブックマーク')
+        self.assertIn('x-main', self.w.editor_subtitle.text())
+        self.assertIn('確認箱へ', self.w.editor_subtitle.text())
+        self.assertEqual(self.w.editor_state.text(), '選択中')
+
+    def test_queue_empty_state_is_replaced_when_job_is_added(self):
+        self.assertFalse(self.w.queue_empty_label.isHidden())
+        self.assertTrue(self.w.queue_scroll.isHidden())
+        self.w.connect_job(DownloadJob('queued', [sys.executable, '-c', 'pass']))
+        self.assertTrue(self.w.queue_empty_label.isHidden())
+        self.assertFalse(self.w.queue_scroll.isHidden())
 
     def test_sidebar_only_shows_login_action_for_selected_service(self):
         from app import AccountProfile
