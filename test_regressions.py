@@ -14,7 +14,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, resolved_application_data_dir, resolved_test_data_dir, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
-from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
+from core import Catalog, LikeSeenRecord, PostRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 from collection_profiles import CollectionProfile
 APP = QApplication.instance() or QApplication([])
 OLD = LikeSeenRecord('2086000000000000000', 1)
@@ -108,6 +108,23 @@ class Regressions(unittest.TestCase):
         ]
         j._reconcile_actual_files()
         self.assertEqual(set(j.verified_file_paths), {str(first), str(second)})
+        self.assertEqual(j.missing_reported_paths, [])
+
+    def test_collection_download_recovers_mojibaked_report_path(self):
+        root = self.root / '日本語の確認箱'; root.mkdir()
+        j = DownloadJob('review verify', [sys.executable])
+        j.verification_root = root
+        j.preexisting_media = snapshot_media_files(root, recursive=False)
+        j.verification_recursive = False
+        j.smc_context = {
+            'job_kind': 'collection_download', 'platform': 'x',
+            'collection_post_ids': [NEW.post_id],
+        }
+        saved = root / f'[26-09-16] {NEW.post_id}_p0.jpg'
+        saved.write_bytes(b'image')
+        j.reported_file_paths = [rf'D:\hitomi\���{saved.name}']
+        j._reconcile_actual_files()
+        self.assertEqual(j.verified_file_paths, [str(saved)])
         self.assertEqual(j.missing_reported_paths, [])
     def test_atomic_json_failure_preserves_settings(self):
         p = self.root / 'accounts.json'; atomic_write_json(p, {'name': 'original'})
@@ -283,7 +300,7 @@ class Regressions(unittest.TestCase):
         likes.setChecked(True)
         self.w.sync_target_ui()
         self.assertFalse(self.w.likes_controls.isHidden())
-        self.assertEqual(self.w.start_btn.text(), '⬇ 新しいいいねを取得')
+        self.assertEqual(self.w.start_btn.text(), '⬇ 新しいいいねを確認')
 
         self.w.platform_combo.setCurrentIndex(self.w.platform_combo.findData('pixiv'))
         likes.setChecked(True)
@@ -734,4 +751,167 @@ class Regressions(unittest.TestCase):
         self.w.job_finished(job, 0)
         self.assertEqual(self.w.catalog.pending_collection_post_count(collection.collection_id), 1)
         self.assertIn('1件', self.w.inbox_btn.text())
+
+    def test_likes_content_controls_are_available(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            'いいね整理', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='text_images', review_mode='inbox',
+            destination=str(self.root / 'media'), text_destination=str(self.root / 'text'),
+        ))
+        self.w.refresh_collections(collection.collection_id)
+        self.assertTrue(self.w.content_mode_combo.isEnabled())
+        self.assertTrue(self.w.review_checkbox.isEnabled())
+        self.assertFalse(self.w.text_dest_row.isHidden())
+        self.assertEqual(self.w.content_mode_combo.currentData(), 'text_images')
+        self.assertTrue(self.w.review_checkbox.isChecked())
+        self.w.range_buttons['all'].setChecked(True)
+        self.w.sync_target_ui()
+        command, _title, context = self.w.build_likes_probe(scan_all=True)
+        self.assertTrue(context['scan_all'])
+        self.assertEqual(context['anchor_ids'], [])
+        self.assertIn('SMC_POST', '\n'.join(command))
+        self.assertEqual(self.w.start_btn.text(), '⬇ いいねを確認')
+
+    def test_likes_probe_enters_inbox_with_text_and_advances_durable_boundary(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            'いいね確認', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='images', review_mode='inbox', destination=str(self.root / 'media'),
+        ))
+        job = DownloadJob('likes inbox', [sys.executable])
+        job.smc_context = dict(
+            self.ctx, collection_id=collection.collection_id,
+            content_mode='images', review_mode='inbox', use_archive=False,
+        )
+        job.anchor_hit = OLD.post_id
+        job.machine_lines = [
+            f'SMC_POST\t{NEW.post_id}\t123\t"artist"\t2026-09-20T01:02:03+0000\t\t"本文メモ"\t1',
+            line(NEW),
+            f'SMC_POST\t{OLD.post_id}\t999\t"old"\t2026-09-01T00:00:00+0000\t\t"old"\t1',
+        ]
+        self.w.job_finished(job, -15)
+        pending = self.w.catalog.collection_posts(collection.collection_id, state='pending')
+        self.assertEqual([rec.post_id for rec in pending], [NEW.post_id])
+        self.assertEqual(pending[0].content, '本文メモ')
+        self.assertEqual(self.anchors()[0], NEW.post_id)
+        self.assertIn('確認箱へ', job.status.text())
+
+    def test_text_only_like_auto_saves_markdown_without_media_job(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        text_dir = self.root / 'likes text'
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '文章いいね', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='text', review_mode='auto', destination=str(self.root / 'media'),
+            text_destination=str(text_dir),
+        ))
+        job = DownloadJob('likes text', [sys.executable])
+        job.smc_context = dict(
+            self.ctx, collection_id=collection.collection_id,
+            content_mode='text', review_mode='auto', use_archive=False,
+        )
+        job.anchor_hit = OLD.post_id
+        job.machine_lines = [
+            f'SMC_POST\t{NEW.post_id}\t123\t"writer"\t2026-09-20T01:02:03+0000\t\t"保存したい本文"\t0',
+            f'SMC_POST\t{OLD.post_id}\t999\t"old"\t2026-09-01T00:00:00+0000\t\t"old"\t1',
+        ]
+        before_jobs = len(self.w.jobs)
+        self.w.job_finished(job, -15)
+        self.assertEqual(len(self.w.jobs), before_jobs)
+        row = self.w.catalog.conn.execute(
+            'SELECT state,choice,markdown_path FROM collection_posts WHERE collection_id=? AND post_id=?',
+            (collection.collection_id, NEW.post_id),
+        ).fetchone()
+        self.assertEqual(row[:2], ('processed', 'text'))
+        self.assertTrue(Path(row[2]).is_file())
+        body = Path(row[2]).read_text(encoding='utf-8')
+        self.assertIn('保存したい本文', body)
+        self.assertIn('いいね取得日時', body)
+
+    def test_likes_post_metadata_can_stop_probe_at_anchor(self):
+        job = DownloadJob('likes probe', [sys.executable])
+        job.smc_context = {'job_kind': 'likes_probe'}
+        job.stop_on_post_ids = {OLD.post_id}
+        job._consume_output_line(
+            f'SMC_POST\t{OLD.post_id}\t1\t"old"\t2026-09-01T00:00:00+0000\t\t"body"\t0'
+        )
+        self.assertEqual(job.anchor_hit, OLD.post_id)
+
+    def test_all_likes_review_scan_deduplicates_without_moving_incremental_anchor(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '全いいね確認', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='images', review_mode='inbox', destination=str(self.root / 'media'),
+        ))
+        already = PostRecord('2086200000000000000', content='already', media_count=0)
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [already])
+        job = DownloadJob('all likes', [sys.executable])
+        job.smc_context = dict(
+            self.ctx, collection_id=collection.collection_id, scan_all=True,
+            content_mode='images', review_mode='inbox', use_archive=False,
+            date_after='2026-09-20',
+        )
+        older_id = '2085000000000000000'
+        job.machine_lines = [
+            f'SMC_POST\t{already.post_id}\t1\t"old"\t2026-09-21T00:00:00+0000\t\t"already"\t0',
+            f'SMC_POST\t{NEW.post_id}\t2\t"new"\t2026-09-20T00:00:00+0000\t\t"new text"\t0',
+            f'SMC_POST\t{older_id}\t3\t"older"\t2026-09-19T23:59:59+0000\t\t"too old"\t0',
+        ]
+        before_anchor = self.anchors()
+        self.w.job_finished(job, 0)
+        pending = self.w.catalog.collection_posts(collection.collection_id, state='pending')
+        self.assertEqual({rec.post_id for rec in pending}, {already.post_id, NEW.post_id})
+        self.assertEqual(self.anchors(), before_anchor)
+        self.assertIn('確認箱へ 1投稿', job.status.text())
+
+    def test_likes_collection_media_failure_returns_post_to_inbox(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '画像いいね', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='images', review_mode='inbox', destination=str(self.root / 'media'),
+        ))
+        post = PostRecord(
+            NEW.post_id, NEW.author_id, NEW.author_name, NEW.post_date,
+            '2026-09-22T00:00:00Z', 'body', 1,
+        )
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [post])
+        self.w.queue_collection_posts(collection, [post], {post.post_id: 'images'})
+        queued = self.w.jobs[-1]
+        self.assertEqual(queued.smc_context['job_kind'], 'collection_download')
+        self.assertEqual(queued.smc_context['target_type'], 'likes')
+        self.assertEqual(queued.smc_context['target_key'], 'x:id:123456789')
+        self.w.job_finished(queued, 1)
+        state = self.w.catalog.conn.execute(
+            'SELECT state FROM collection_posts WHERE collection_id=? AND post_id=?',
+            (collection.collection_id, post.post_id),
+        ).fetchone()[0]
+        self.assertEqual(state, 'pending')
+
+    def test_likes_media_setup_error_returns_post_to_inbox(self):
+        from app import AccountProfile
+        account = AccountProfile('missing identity', 'x')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '復旧確認', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='images', review_mode='inbox', destination=str(self.root / 'media'),
+        ))
+        post = PostRecord(NEW.post_id, media_count=1)
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [post])
+        with self.assertRaisesRegex(ValueError, 'URL / ユーザー名 / ID'):
+            self.w.queue_collection_posts(collection, [post], {post.post_id: 'images'})
+        state = self.w.catalog.conn.execute(
+            'SELECT state FROM collection_posts WHERE collection_id=? AND post_id=?',
+            (collection.collection_id, post.post_id),
+        ).fetchone()[0]
+        self.assertEqual(state, 'pending')
 if __name__ == '__main__': unittest.main(verbosity=2)

@@ -50,6 +50,10 @@ SMC_POST_FORMAT = (
     "{date:%Y-%m-%dT%H:%M:%S%z}\t{date_bookmarked:%Y-%m-%dT%H:%M:%S%z}\t"
     "{content!j}\t{count}"
 )
+SMC_LIKE_POST_FORMAT = (
+    "directory:SMC_POST\t{tweet_id}\t{author[id]}\t{author[name]!j}\t"
+    "{date:%Y-%m-%dT%H:%M:%S%z}\t\t{content!j}\t{count}"
+)
 
 
 def atomic_write_json(path: Path, value) -> None:
@@ -516,7 +520,9 @@ def find_bookmark_boundary(records: Iterable[PostRecord], known_post_ids: Iterab
     return {"found": False, "first_run": False, "records": [], "anchor_post_id": ""}
 
 
-def write_post_markdown(record: PostRecord, destination: Path) -> Path:
+def write_post_markdown(
+    record: PostRecord, destination: Path, *, activity_label: str = "ブックマーク日時",
+) -> Path:
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     stamp = (record.collected_date or record.post_date or "undated")[:10]
@@ -526,7 +532,7 @@ def write_post_markdown(record: PostRecord, destination: Path) -> Path:
         f"# @{record.author_name or record.author_id or 'unknown'}\n\n"
         f"- 元投稿: {record.source_url}\n"
         f"- 投稿日時: {record.post_date or '不明'}\n"
-        f"- ブックマーク日時: {record.collected_date or '不明'}\n\n"
+        f"- {activity_label}: {record.collected_date or '不明'}\n\n"
         f"{record.content.strip()}\n"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -725,13 +731,22 @@ def build_x_likes_anchor_command(
 
 def build_x_likes_probe_command(
     engine: list[str], *, url: str, auth_mode: str, auth_value: str,
-    max_media: int = 500,
+    max_media: int = 500, include_posts: bool = False,
 ) -> list[str]:
-    """No-download probe used to find a saved anchor near the top of Likes."""
+    """No-download Likes probe, optionally including text-only post metadata."""
     limit = max(10, int(max_media))
     cmd = list(engine) + ["--windows-filenames", "--no-input"]
     _append_auth(cmd, "x", auth_mode, auth_value)
-    cmd += ["--range", f"1-{limit}", "-N", SMC_LIKE_SEEN_FORMAT, url]
+    if include_posts:
+        cmd += [
+            "-o", "extractor.twitter.text-tweets=true",
+            "--post-range", f"1-{limit}",
+            "-N", SMC_LIKE_SEEN_FORMAT,
+            "-N", SMC_LIKE_POST_FORMAT,
+            url,
+        ]
+    else:
+        cmd += ["--range", f"1-{limit}", "-N", SMC_LIKE_SEEN_FORMAT, url]
     return cmd
 
 

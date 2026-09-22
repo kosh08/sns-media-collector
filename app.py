@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.6"
+APP_VERSION = "0.4.7"
 
 
 def resolved_test_data_dir() -> str:
@@ -1304,12 +1304,22 @@ class DownloadJob(QWidget):
             # job and accepting only filenames containing a Tweet ID that the
             # immediately preceding probe selected.
             ctx = getattr(self, "smc_context", {})
-            if (ctx.get("job_kind") == "likes_download" and
+            recoverable_x_job = (
+                ctx.get("job_kind") == "likes_download"
+                or (
+                    ctx.get("job_kind") == "collection_download"
+                    and ctx.get("platform") == "x"
+                )
+            )
+            if (recoverable_x_job and
                     len(self.verified_file_paths) < len(set(self.reported_file_paths))):
                 expected_ids = {
                     str(getattr(rec, "post_id", "") or "")
                     for rec in (ctx.get("probe_new_records") or [])
                 }
+                expected_ids.update(
+                    str(post_id) for post_id in (ctx.get("collection_post_ids") or [])
+                )
                 expected_ids.discard("")
                 if expected_ids:
                     verified_before_recovery = len(self.verified_file_paths)
@@ -1367,7 +1377,14 @@ class DownloadJob(QWidget):
                     self.status.setText(f"メディア確認中 / {self.meta_media_count:,}件")
             elif line.startswith("SMC_POST\t"):
                 self.meta_media_count += 1
-                self.status.setText(f"ブックマーク確認中 / {self.meta_media_count:,}投稿")
+                ctx = getattr(self, "smc_context", {})
+                label = "Likes" if ctx.get("job_kind") == "likes_probe" else "ブックマーク"
+                self.status.setText(f"{label}確認中 / {self.meta_media_count:,}投稿")
+                if self.stop_on_post_ids and not self.anchor_hit:
+                    parts = line.split("\t", 2)
+                    if len(parts) >= 2 and parts[1] in self.stop_on_post_ids:
+                        self.anchor_hit = parts[1]
+                        QTimer.singleShot(0, self._request_anchor_stop)
         else:
             self.output_lines.append(line)
             if len(self.output_lines) > 1000:
@@ -1898,7 +1915,7 @@ class MainWindow(QMainWindow):
         likes_row.addWidget(self.likes_anchor_spin)
         likes_row.addWidget(QLabel("探索上限"))
         self.likes_probe_spin = QSpinBox(); self.likes_probe_spin.setRange(50, 500); self.likes_probe_spin.setValue(300)
-        self.likes_probe_spin.setSuffix(" メディア")
+        self.likes_probe_spin.setSuffix(" 投稿")
         likes_row.addWidget(self.likes_probe_spin)
         likes_row.addStretch(); likes_box.addLayout(likes_row)
         self.likes_note = QLabel(
@@ -2610,17 +2627,18 @@ class MainWindow(QMainWindow):
         is_x_likes = self.platform_combo.currentData() == "x" and self.selected_target() == "likes"
         is_pixiv_bookmarks = self.platform_combo.currentData() == "pixiv" and self.selected_target() == "likes"
         is_x_bookmarks = self.platform_combo.currentData() == "x" and self.selected_target() == "bookmarks"
+        is_x_reviewable = is_x_bookmarks or is_x_likes
         if hasattr(self, "scope_combo"):
             self.scope_combo.setEnabled(not is_x_bookmarks)
             self.url_edit.setEnabled(self.scope_combo.currentData() == "other" and not is_x_bookmarks)
             self.url_edit.setVisible(self.scope_combo.currentData() == "other" and not is_x_bookmarks)
         if hasattr(self, "content_mode_combo"):
-            self.content_mode_combo.setEnabled(is_x_bookmarks)
-            self.review_checkbox.setEnabled(is_x_bookmarks)
-            if not is_x_bookmarks:
+            self.content_mode_combo.setEnabled(is_x_reviewable)
+            self.review_checkbox.setEnabled(is_x_reviewable)
+            if not is_x_reviewable:
                 self.content_mode_combo.setCurrentIndex(max(0, self.content_mode_combo.findData("images")))
                 self.review_checkbox.setChecked(False)
-            self.text_dest_row.setVisible(is_x_bookmarks)
+            self.text_dest_row.setVisible(is_x_reviewable)
         range_button = self.range_group.checkedButton() if hasattr(self, "range_group") else None
         range_mode = str(range_button.property("key")) if range_button else "incremental"
         if is_pixiv_bookmarks and range_mode == "date":
@@ -2653,11 +2671,17 @@ class MainWindow(QMainWindow):
             else:
                 self.import_btn.setText("既存の保存フォルダをこの対象に登録")
         if hasattr(self, "start_btn"):
-            label = {
-                ("x", "likes"): "⬇ 新しいいいねを取得",
-                ("x", "bookmarks"): "⬇ ブックマークを確認",
-                ("pixiv", "likes"): "⬇ ブックマークを取得",
-            }.get((self.platform_combo.currentData(), self.selected_target()), "⬇ ダウンロード開始")
+            if is_x_likes:
+                label = (
+                    "⬇ 新しいいいねを確認"
+                    if range_mode == "incremental"
+                    else "⬇ いいねを確認"
+                )
+            else:
+                label = {
+                    ("x", "bookmarks"): "⬇ ブックマークを確認",
+                    ("pixiv", "likes"): "⬇ ブックマークを取得",
+                }.get((self.platform_combo.currentData(), self.selected_target()), "⬇ ダウンロード開始")
             self.start_btn.setText(label)
         if hasattr(self, "range_note"):
             if is_pixiv_bookmarks:
@@ -2760,7 +2784,9 @@ class MainWindow(QMainWindow):
     def has_pending_likes_job(self, target_key: str = "") -> bool:
         for job in self.jobs:
             ctx = getattr(job, "smc_context", {})
-            if ctx.get("job_kind") not in {"likes_anchor", "likes_probe", "likes_download"}:
+            if ctx.get("job_kind") not in {"likes_anchor", "likes_probe", "likes_download", "collection_download"}:
+                continue
+            if ctx.get("job_kind") == "collection_download" and ctx.get("target_type") != "likes":
                 continue
             if target_key and ctx.get("target_key") != target_key:
                 continue
@@ -2806,26 +2832,55 @@ class MainWindow(QMainWindow):
         button = self.range_group.checkedButton()
         return bool(button and str(button.property("key")) == "incremental")
 
-    def build_likes_probe(self) -> tuple[list[str], str, dict]:
+    def is_x_likes_review_flow(self) -> bool:
+        return bool(
+            self.platform_combo.currentData() == "x"
+            and self.selected_target() == "likes"
+            and (
+                self.review_checkbox.isChecked()
+                or self.content_mode_combo.currentData() != "images"
+            )
+        )
+
+    def build_likes_probe(self, *, scan_all: bool = False) -> tuple[list[str], str, dict]:
         url, target_key, target_name = self.current_target()
         account_name, auth_mode, auth_value = self.current_auth()
         self.ensure_auth_ready(auth_mode, auth_value)
         profile = self.target_store.ensure(target_key, "x", target_name)
-        if not profile.likes_anchor_at:
+        if not scan_all and not profile.likes_anchor_at:
             raise ValueError("Likesアンカーがありません。先に『Likesアンカーを作成（DLなし）』を実行してください。")
-        if profile.likes_anchor_login and profile.likes_anchor_login != account_name:
+        if not scan_all and profile.likes_anchor_login and profile.likes_anchor_login != account_name:
             raise ValueError(
                 f"このLikesアンカーは認証プロファイル『{profile.likes_anchor_login}』で作成されています。"
                 f"現在は『{account_name}』です。同じ認証プロファイルを選ぶか、アンカーを作り直してください。"
             )
-        anchor_ids = self.catalog.likes_anchor_ids(target_key=target_key, login_profile=account_name)
-        if not anchor_ids:
+        anchor_ids = ([] if scan_all else self.catalog.likes_anchor_ids(
+            target_key=target_key, login_profile=account_name
+        ))
+        if not scan_all and not anchor_ids:
             raise ValueError("LikesアンカーDBが空です。『Likesアンカーを作成（DLなし）』をやり直してください。")
+        collection = self.current_collection()
+        collection_id = ""
+        if collection and collection.platform == "x" and collection.source == "likes":
+            collection_id = collection.collection_id
+        content_mode = str(self.content_mode_combo.currentData() or "images")
+        review_mode = "inbox" if self.review_checkbox.isChecked() else "auto"
+        range_button = self.range_group.checkedButton()
+        range_mode = str(range_button.property("key")) if range_button else "incremental"
+        date_after = self.date_after_edit.text().strip() if scan_all and range_mode == "date" else ""
+        if date_after and not parse_iso(date_after):
+            raise ValueError("投稿日は YYYY-MM-DD 形式で入力してください。")
+        if (content_mode != "images" or review_mode == "inbox") and not collection_id:
+            raise ValueError("本文保存または確認箱を使う場合は、先にこの内容を取得設定として保存してください。")
         cmd = build_x_likes_probe_command(
             self.engine_command(), url=url, auth_mode=auth_mode, auth_value=auth_value,
             max_media=self.likes_probe_spin.value(),
+            include_posts=(content_mode != "images" or review_mode == "inbox"),
         )
-        title = f"X / {account_name} / {target_name} / Likes差分確認（DLなし）"
+        title = (
+            f"X / {account_name} / {target_name} / "
+            f"{'Likes一覧確認' if scan_all else 'Likes差分確認'}（DLなし）"
+        )
         ctx = {
             "job_kind": "likes_probe",
             "platform": "x",
@@ -2836,6 +2891,7 @@ class MainWindow(QMainWindow):
             "auth_mode": auth_mode,
             "auth_value": auth_value,
             "anchor_ids": anchor_ids,
+            "scan_all": scan_all,
             "anchor_posts": max(1, int(profile.likes_anchor_posts or self.likes_anchor_spin.value())),
             "archive_scope": f"{target_key}:likes",
             "destination": self.dest_edit.text().strip(),
@@ -2844,13 +2900,18 @@ class MainWindow(QMainWindow):
             "use_archive": self.chk_archive.isChecked(),
             "direct_folder": self.chk_direct_folder.isChecked(),
             "hitomi_compat": self.chk_hitomi_name.isChecked(),
+            "collection_id": collection_id,
+            "content_mode": content_mode,
+            "review_mode": review_mode,
+            "text_destination": self.text_dest_edit.text().strip(),
+            "date_after": date_after,
             "started_at": iso_utc(utc_now()),
         }
         return cmd, title, ctx
 
-    def enqueue_likes_probe(self):
+    def enqueue_likes_probe(self, *, scan_all: bool = False):
         try:
-            cmd, title, ctx = self.build_likes_probe()
+            cmd, title, ctx = self.build_likes_probe(scan_all=scan_all)
         except Exception as exc:
             QMessageBox.warning(self, "Likes差分確認", str(exc))
             return
@@ -2864,8 +2925,9 @@ class MainWindow(QMainWindow):
         self.jobs.append(job)
         self.queue_layout.addWidget(job)
         self.log.append(
-            f"[LIKES PROBE] 最大{self.likes_probe_spin.value():,}メディアだけ確認し、"
-            "アンカーに到達した時点で停止します。画像はまだDLしません。"
+            f"[LIKES PROBE] 最大{self.likes_probe_spin.value():,}投稿だけ確認し、"
+            + ("保存済み投稿を除いて確認箱／保存方針へ送ります。画像はまだDLしません。"
+               if scan_all else "アンカーに到達した時点で停止します。画像はまだDLしません。")
         )
         if self.active_job is None:
             self.start_next_job()
@@ -3033,10 +3095,15 @@ class MainWindow(QMainWindow):
                 cmd = build_x_bookmark_scan_command(self.engine_command(), auth_mode=mode, auth_value=value)
                 safe = redact_command(cmd)
                 self.log.append("[BOOKMARKS] 本文とメディア数だけ先に確認します。画像は振り分け後に取得します。")
-            elif self.is_x_likes_incremental():
-                cmd, _title, _ctx = self.build_likes_probe()
+            elif self.is_x_likes_incremental() or self.is_x_likes_review_flow():
+                scan_all = not self.is_x_likes_incremental()
+                cmd, _title, _ctx = self.build_likes_probe(scan_all=scan_all)
                 safe = redact_command(cmd)
-                self.log.append("[LIKES] 1段目はアンカー探索（DLなし）。アンカー手前の投稿だけ2段目で直接DLします。")
+                self.log.append(
+                    "[LIKES] 本文とメディア数を先に確認し、確認箱または指定した保存方針へ送ります。"
+                    if self.is_x_likes_review_flow()
+                    else "[LIKES] 1段目はアンカー探索（DLなし）。アンカー手前の投稿だけ2段目で直接DLします。"
+                )
             else:
                 cmd, _ = self.build_command()
                 safe = redact_command(cmd)
@@ -3051,8 +3118,8 @@ class MainWindow(QMainWindow):
         if self.platform_combo.currentData() == "x" and self.selected_target() == "bookmarks":
             self.enqueue_bookmark_scan()
             return
-        if self.is_x_likes_incremental():
-            self.enqueue_likes_probe()
+        if self.is_x_likes_incremental() or self.is_x_likes_review_flow():
+            self.enqueue_likes_probe(scan_all=not self.is_x_likes_incremental())
             return
         try:
             cmd, title = self.build_command()
@@ -3103,7 +3170,9 @@ class MainWindow(QMainWindow):
         self.log.append("[BOOKMARKS] 最大件数まで本文・画像数を確認します。画像はまだダウンロードしません。")
         if self.active_job is None: self.start_next_job()
 
-    def queue_bookmark_media(self, collection: CollectionProfile, records: list[PostRecord], choices: dict[str, str]):
+    def queue_collection_posts(
+        self, collection: CollectionProfile, records: list[PostRecord], choices: dict[str, str],
+    ):
         account = next((a for a in self.accounts if a.profile_id == collection.account_id), None)
         if not account:
             raise ValueError("認証アカウントが見つかりません。")
@@ -3111,11 +3180,17 @@ class MainWindow(QMainWindow):
         destination.mkdir(parents=True, exist_ok=True)
         media_records = [r for r in records if choices.get(r.post_id) in {"images", "text_images"} and r.media_count > 0]
         immediate = [r for r in records if r not in media_records]
+        markdown_paths: dict[str, str] = {}
         for rec in records:
             choice = choices.get(rec.post_id, "skip")
             markdown_path = ""
             if choice in {"text", "text_images"}:
-                markdown_path = str(write_post_markdown(rec, Path(collection.text_destination or destination / "text")))
+                markdown_path = str(write_post_markdown(
+                    rec,
+                    Path(collection.text_destination or destination / "text"),
+                    activity_label="いいね取得日時" if collection.source == "likes" else "ブックマーク日時",
+                ))
+            markdown_paths[rec.post_id] = markdown_path
             if rec in immediate:
                 self.catalog.set_collection_post_choice(
                     collection.collection_id, rec.post_id, choice,
@@ -3128,30 +3203,50 @@ class MainWindow(QMainWindow):
                 )
         if not media_records:
             self.refresh_inbox_count(); return
-        target_key = f"x:bookmarks:{collection.collection_id}"
-        profile = self.target_store.ensure(target_key, "x", collection.name)
-        base = core_build_command(
-            self.engine_command(), platform="x", url=media_records[0].source_url,
-            destination=destination, account_name=account.name,
-            auth_mode=account.auth_mode, auth_value=account.auth_value,
-            archive_scope=f"{target_key}:posts", extensions=self.selected_extensions(),
-            capture_internal_metadata=True, use_archive=True,
-            archive_dir=self.data_dir / "archives", direct_folder=True,
-            range_mode="all", profile=profile, manual_date_after="", overlap_minutes=10,
-            hitomi_compat_x=True, target_type="posts",
-        )
-        command = append_urls(base, [r.source_url for r in media_records])
-        job = DownloadJob(f"X / {account.name} / {collection.name} / 振り分け済みメディア", command)
-        job.smc_context = {
-            "job_kind": "bookmark_download", "collection_id": collection.collection_id,
-            "bookmark_post_ids": [r.post_id for r in media_records], "platform": "x",
-            "target_key": target_key, "target_name": collection.name, "target_type": "bookmarks",
-            "destination": str(destination), "login_name": account.name,
-            "started_at": iso_utc(utc_now()), "started_epoch": time.time(),
-            "hitomi_compat": True, "direct_folder": True,
-        }
-        self.connect_job(job); self.jobs.append(job); self.queue_layout.addWidget(job)
-        if self.active_job is None: self.start_next_job()
+        try:
+            if collection.source == "likes":
+                raw = collection.target_value
+                if collection.target_scope == "self":
+                    raw = f"id:{account.user_id}" if account.user_id else account.username
+                _url, target_key, _name = normalize_target("x", raw, "likes")
+                archive_scope = f"{target_key}:likes"
+            else:
+                target_key = f"x:bookmarks:{collection.collection_id}"
+                archive_scope = f"{target_key}:posts"
+            profile = self.target_store.ensure(target_key, "x", collection.name)
+            base = core_build_command(
+                self.engine_command(), platform="x", url=media_records[0].source_url,
+                destination=destination, account_name=account.name,
+                auth_mode=account.auth_mode, auth_value=account.auth_value,
+                archive_scope=archive_scope, extensions=self.selected_extensions(),
+                capture_internal_metadata=True, use_archive=True,
+                archive_dir=self.data_dir / "archives", direct_folder=True,
+                range_mode="all", profile=profile, manual_date_after="", overlap_minutes=10,
+                hitomi_compat_x=True, target_type=collection.source,
+            )
+            command = append_urls(base, [r.source_url for r in media_records])
+            job = DownloadJob(f"X / {account.name} / {collection.name} / 振り分け済みメディア", command)
+            job.smc_context = {
+                "job_kind": "collection_download", "collection_id": collection.collection_id,
+                "collection_post_ids": [r.post_id for r in media_records], "platform": "x",
+                "target_key": target_key, "target_name": collection.name, "target_type": collection.source,
+                "destination": str(destination), "login_name": account.name,
+                "started_at": iso_utc(utc_now()), "started_epoch": time.time(),
+                "hitomi_compat": True, "direct_folder": True,
+            }
+            self.connect_job(job); self.jobs.append(job); self.queue_layout.addWidget(job)
+            if self.active_job is None: self.start_next_job()
+        except Exception:
+            for rec in media_records:
+                self.catalog.set_collection_post_choice(
+                    collection.collection_id,
+                    rec.post_id,
+                    choices.get(rec.post_id, "images"),
+                    state="pending",
+                    markdown_path=markdown_paths.get(rec.post_id, ""),
+                )
+            self.refresh_inbox_count()
+            raise
 
     def refresh_inbox_count(self):
         if hasattr(self, "inbox_btn"):
@@ -3194,7 +3289,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             try:
                 choices = {post_id: str(combo.currentData()) for post_id, combo in selectors.items()}
-                self.queue_bookmark_media(collection, records, choices)
+                self.queue_collection_posts(collection, records, choices)
                 self.refresh_inbox_count()
             except Exception as exc:
                 QMessageBox.warning(self, "振り分け", str(exc))
@@ -3236,6 +3331,42 @@ class MainWindow(QMainWindow):
         self.target_store.save()
         self.log.append(f"[LIKES ANCHOR MOVE] {old[:1]} → {actual[:1]} / DB再読込確認 OK")
 
+    def commit_likes_post_boundary(
+        self, ctx: dict, posts: list[PostRecord], media_records: list[LikeSeenRecord],
+    ) -> None:
+        """Advance after post metadata is durable, including text-only Likes."""
+        key, login = ctx["target_key"], ctx.get("login_name", "")
+        old = self.catalog.likes_anchor_ids(target_key=key, login_profile=login)
+        anchor_records = [
+            LikeSeenRecord(
+                rec.post_id, 1, rec.author_id, rec.author_name, rec.post_date, ""
+            )
+            for rec in posts
+        ]
+        rotated = self.catalog.rotate_likes_anchors(
+            anchor_records,
+            target_key=key,
+            login_profile=login,
+            max_posts=int(ctx.get("anchor_posts", 50)),
+        )
+        actual = self.catalog.likes_anchor_ids(target_key=key, login_profile=login)
+        if actual != rotated["post_ids"]:
+            raise RuntimeError("Likes投稿アンカーの保存後確認に失敗しました")
+        seen = self.catalog.record_likes_seen(
+            media_records, target_key=key, login_profile=login,
+        )
+        profile = self.target_store.ensure(key, "x", ctx.get("target_name", ""))
+        profile.likes_anchor_at = iso_utc(utc_now())
+        profile.likes_anchor_login = login
+        profile.likes_anchor_posts = len(actual)
+        profile.likes_seen_media = seen["media_total"]
+        profile.likes_seen_posts = seen["posts_total"]
+        self.target_store.save()
+        self.log.append(
+            f"[LIKES INBOX ANCHOR] {old[:1]} → {actual[:1]} / "
+            f"本文込み{len(posts):,}投稿を永続化済み"
+        )
+
     def job_finished(self, job: DownloadJob, code: int):
         ctx = getattr(job, "smc_context", {})
         logical_ok = not job.cancelled and (code == 0 or (ctx.get("job_kind") == "likes_probe" and bool(job.anchor_hit)))
@@ -3269,7 +3400,7 @@ class MainWindow(QMainWindow):
                     self.refresh_inbox_count()
                 elif new_records:
                     choices = {r.post_id: collection.content_mode for r in new_records}
-                    self.queue_bookmark_media(collection, new_records, choices)
+                    self.queue_collection_posts(collection, new_records, choices)
                     job.status.setText(f"自動振り分け {len(new_records):,}投稿")
                 else:
                     job.status.setText("新規ブックマークなし")
@@ -3278,9 +3409,16 @@ class MainWindow(QMainWindow):
                 self.log.append(f"[BOOKMARKS ERROR] {exc}")
             self.active_job = None; self.start_next_job(); return
 
-        if ctx.get("job_kind") == "bookmark_download":
-            state = "processed" if logical_ok else "pending"
-            for post_id in ctx.get("bookmark_post_ids", []):
+        if ctx.get("job_kind") in {"bookmark_download", "collection_download"}:
+            collection_download_ok = (
+                logical_ok and not job.verification_error and not job.cancelled
+                and safe_to_advance_download_state(
+                    len(job.reported_file_paths), len(job.missing_reported_paths)
+                )
+            )
+            state = "processed" if collection_download_ok else "pending"
+            post_ids = ctx.get("collection_post_ids", ctx.get("bookmark_post_ids", []))
+            for post_id in post_ids:
                 row = self.catalog.conn.execute(
                     "SELECT choice,markdown_path FROM collection_posts WHERE collection_id=? AND post_id=?",
                     (ctx.get("collection_id", ""), post_id),
@@ -3391,28 +3529,121 @@ class MainWindow(QMainWindow):
                 if not logical_ok:
                     raise ValueError("差分確認が失敗・中断しました。取得ジョブは作成しません。")
                 records: list[LikeSeenRecord] = []
+                post_records: list[PostRecord] = []
                 for line in job.machine_lines:
                     rec = parse_smc_like_seen_line(line)
-                    if rec:
+                    if rec and (
+                        not rec.extension
+                        or ("." + rec.extension.lower()) in MEDIA_EXTENSIONS
+                    ):
                         records.append(rec)
-                boundary = find_likes_anchor_boundary(records, ctx.get("anchor_ids", []))
+                    post = parse_smc_post_line(line)
+                    if post:
+                        post_records.append(post)
+                post_records = list({rec.post_id: rec for rec in post_records}.values())
+                if post_records:
+                    if ctx.get("scan_all"):
+                        date_after = str(ctx.get("date_after") or "")
+                        known_posts = self.catalog.collection_post_ids(
+                            str(ctx.get("collection_id") or "")
+                        )
+                        new_post_records = [
+                            rec for rec in post_records
+                            if rec.post_id not in known_posts
+                            and (not date_after or (rec.post_date or "")[:10] >= date_after)
+                        ]
+                        post_boundary = {
+                            "found": True, "records": new_post_records,
+                            "anchor_post_id": "",
+                        }
+                    else:
+                        post_boundary = find_bookmark_boundary(post_records, ctx.get("anchor_ids", []))
+                        new_post_records = list(post_boundary.get("records") or [])
+                    new_ids = {rec.post_id for rec in new_post_records}
+                    new_records = [rec for rec in records if rec.post_id in new_ids]
+                    boundary = {
+                        "found": post_boundary.get("found", False),
+                        "anchor_post_id": post_boundary.get("anchor_post_id", ""),
+                        "records_before_anchor": new_records,
+                        "new_posts": len(new_post_records),
+                        "new_media": len(new_records),
+                    }
+                else:
+                    new_post_records = []
+                    boundary = find_likes_anchor_boundary(records, ctx.get("anchor_ids", []))
                 if not boundary.get("found"):
                     job.status.setText("確認保留 / アンカー未検出・ダウンロードなし")
                     self.log.append(
                         f"[LIKES SAFE STOP] 探索上限内でアンカーを検出できませんでした "
-                        f"（確認 {len(records):,}メディア）。昔削除した画像を復活させないため、"
+                        f"（確認 {len(post_records):,}投稿・{len(records):,}メディア）。昔削除した画像を復活させないため、"
                         "今回は1件もダウンロードしません。アンカーを作り直してください。"
                     )
                 else:
                     new_records = list(boundary.get("records_before_anchor") or [])
                     new_posts = int(boundary.get("new_posts") or 0)
-                    self.log.append(
-                        f"[LIKES PROBE OK] アンカー {boundary.get('anchor_post_id')} に到達。"
-                        f"手前に候補 {new_posts:,}投稿 / {len(new_records):,}メディア。"
-                    )
+                    if ctx.get("scan_all"):
+                        self.log.append(
+                            f"[LIKES SCAN OK] 未登録候補 {new_posts:,}投稿 / {len(new_records):,}メディア。"
+                        )
+                    else:
+                        self.log.append(
+                            f"[LIKES PROBE OK] アンカー {boundary.get('anchor_post_id')} に到達。"
+                            f"手前に候補 {new_posts:,}投稿 / {len(new_records):,}メディア。"
+                        )
                     known, pending = self.classify_likes(ctx, new_records)
                     self.log.append(f"[LIKES CHECK] 取得済み {len(known):,} / 未取得候補 {len(pending):,}メディア")
-                    if not pending:
+                    collection = self.collection_store.get(str(ctx.get("collection_id") or ""))
+                    collection_flow = bool(
+                        collection and (
+                            ctx.get("review_mode") == "inbox"
+                            or ctx.get("content_mode") != "images"
+                        )
+                    )
+                    if collection_flow and collection:
+                        if not new_post_records and new_records:
+                            grouped: dict[str, list[LikeSeenRecord]] = {}
+                            for rec in new_records:
+                                grouped.setdefault(rec.post_id, []).append(rec)
+                            new_post_records = [
+                                PostRecord(
+                                    post_id=items[0].post_id,
+                                    author_id=items[0].author_id,
+                                    author_name=items[0].author_name,
+                                    post_date=items[0].post_date,
+                                    collected_date=iso_utc(utc_now()),
+                                    content="",
+                                    media_count=len(items),
+                                )
+                                for items in grouped.values()
+                            ]
+                        now = iso_utc(utc_now())
+                        durable_posts = [
+                            PostRecord(
+                                rec.post_id, rec.author_id, rec.author_name, rec.post_date,
+                                rec.collected_date or now, rec.content, rec.media_count,
+                            )
+                            for rec in new_post_records
+                        ]
+                        result = self.catalog.upsert_collection_posts(
+                            collection.collection_id,
+                            durable_posts,
+                            pending=ctx.get("review_mode") == "inbox",
+                        )
+                        if durable_posts and not ctx.get("scan_all"):
+                            self.commit_likes_post_boundary(ctx, durable_posts, new_records)
+                        if ctx.get("review_mode") == "inbox":
+                            job.status.setText(f"確認箱へ {result['added']:,}投稿")
+                            self.refresh_inbox_count()
+                            self.log.append(
+                                f"[LIKES INBOX] 本文込み {result['added']:,}投稿を確認箱へ追加しました。"
+                            )
+                        elif durable_posts:
+                            choices = {rec.post_id: str(ctx.get("content_mode") or "images") for rec in durable_posts}
+                            self.queue_collection_posts(collection, durable_posts, choices)
+                            job.status.setText(f"自動振り分け {len(durable_posts):,}投稿")
+                        else:
+                            job.status.setText("新規いいねなし")
+                    elif not pending:
                         if new_records:
                             self.commit_likes_boundary(ctx, new_records)
                         job.status.setText(f"新規なし / 取得済み {len(known):,}メディア")

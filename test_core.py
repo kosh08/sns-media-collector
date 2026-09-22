@@ -481,8 +481,19 @@ class CoreTests(unittest.TestCase):
         )
         self.assertIn("--range", cmd)
         self.assertEqual(cmd[cmd.index("--range") + 1], "1-321")
-        self.assertIn("-N", cmd)
+        self.assertEqual(cmd.count("-N"), 1)
         self.assertNotIn("--download-archive", cmd)
+
+    def test_review_probe_includes_text_only_posts(self):
+        cmd = build_x_likes_probe_command(
+            ["gallery-dl"], url="https://x.com/me/likes",
+            auth_mode="none", auth_value="", max_media=123, include_posts=True,
+        )
+        self.assertIn("--post-range", cmd)
+        self.assertEqual(cmd[cmd.index("--post-range") + 1], "1-123")
+        self.assertEqual(cmd.count("-N"), 2)
+        self.assertIn("extractor.twitter.text-tweets=true", cmd)
+        self.assertIn("SMC_POST", "\n".join(cmd))
 
     def test_anchor_boundary_only_returns_records_before_first_anchor(self):
         records = [
