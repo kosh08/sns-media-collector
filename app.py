@@ -27,6 +27,7 @@ from core import (
     parse_smc_post_line, write_post_markdown,
 )
 from collection_profiles import CollectionProfile, CollectionStore
+from recovery import find_recovery_candidate, restore_candidate
 
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QInputDialog,
@@ -44,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.3"
+APP_VERSION = "0.4.4"
 
 
 def resolved_test_data_dir() -> str:
@@ -1329,6 +1330,50 @@ class MainWindow(QMainWindow):
                          if test_data_dir else QSettings("MasterTools", APP_NAME))
         self.data_dir = Path(test_data_dir) if test_data_dir else Path(self.settings.value("data_dir", str(Path.home() / "SNSMediaCollector")))
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._recovery_report = None
+        self._recovery_settings_error = ""
+        if not test_data_dir:
+            candidate = find_recovery_candidate(self.data_dir)
+            if candidate is not None:
+                answer = QMessageBox.question(
+                    self,
+                    "一時フォルダの利用データを復旧",
+                    "前回の不具合で一時フォルダに残った利用データを検出しました。\n\n"
+                    f"認証アカウント: {candidate.account_count}件\n"
+                    f"取得設定: {candidate.collection_count}件\n"
+                    f"復旧元: {candidate.path}\n\n"
+                    "取得設定・認証・差分位置・archive・保存済みファイルを通常のデータフォルダへ復旧します。\n"
+                    "現在の設定は先にバックアップし、復旧元は削除しません。",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if answer == QMessageBox.Yes:
+                    try:
+                        report = restore_candidate(candidate, self.data_dir)
+                        self._recovery_report = report
+                        if report.settings_path:
+                            settings_backup = {
+                                key: self.settings.value(key)
+                                for key in ("account_sessions", "last_session", "data_dir")
+                                if self.settings.contains(key)
+                            }
+                            try:
+                                atomic_write_json(
+                                    report.backup / "settings-before-recovery.json",
+                                    settings_backup,
+                                )
+                                old_settings = QSettings(str(report.settings_path), QSettings.IniFormat)
+                                for key in ("account_sessions", "last_session"):
+                                    if old_settings.contains(key):
+                                        self.settings.setValue(key, old_settings.value(key))
+                                self.settings.sync()
+                            except Exception as exc:
+                                self._recovery_settings_error = str(exc)
+                    except Exception as exc:
+                        QMessageBox.warning(
+                            self, "復旧できませんでした",
+                            "一時フォルダには変更を加えていません。\n\n" + str(exc),
+                        )
         self.accounts_file = self.data_dir / "accounts.json"
         self.accounts: list[AccountProfile] = self.load_accounts()
         self.target_store = TargetStore(self.data_dir / "targets.json")
@@ -1365,6 +1410,25 @@ class MainWindow(QMainWindow):
                 f"[SETTINGS REPAIR] 検証用の一時保存先を {self._settings_repair_count} 箇所修復しました。"
             )
             self.footer_status.setText("検証用の一時保存先を通常の保存先へ戻しました")
+        if self._recovery_report is not None:
+            report = self._recovery_report
+            self.log.append(
+                f"[RECOVERY] {report.source} から利用データを復旧しました。"
+                f" 状態ファイル {report.state_files}件 / 保存済みファイル {report.media_files}件"
+            )
+            if self._recovery_settings_error:
+                self.log.append(
+                    "[RECOVERY WARNING] 最後に開いていた画面状態だけは復元できませんでした。"
+                )
+            self.footer_status.setText("一時フォルダから取得設定・認証・差分位置を復旧しました")
+            QMessageBox.information(
+                self,
+                "復旧が完了しました",
+                "取得設定・認証・差分位置を通常のデータフォルダへ復旧しました。\n\n"
+                f"復旧元: {report.source}\n"
+                f"復旧前バックアップ: {report.backup}\n\n"
+                "復旧元とバックアップは自動削除していません。取得設定と保存先を確認してから取得を再開してください。",
+            )
         restored_account_id = ""
         try:
             restored_account_id = str(json.loads(str(self.settings.value("last_session", "{}"))).get("account_id") or "")
