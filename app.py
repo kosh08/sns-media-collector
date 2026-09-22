@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.5"
+APP_VERSION = "0.4.6"
 
 
 def resolved_test_data_dir() -> str:
@@ -529,11 +529,15 @@ class AccountDialog(QDialog):
                  data_dir: Optional[Path] = None, engine: Optional[list[str]] = None):
         super().__init__(parent)
         self.profile_id = profile.profile_id if profile else uuid.uuid4().hex
+        self._identity_platform = profile.platform if profile else "x"
+        self._profile_user_id = profile.user_id if profile else ""
+        self._profile_username = profile.username if profile else ""
         self.data_dir = Path(data_dir or Path.home() / "SNSMediaCollector")
         self.engine = list(engine or [])
         self._auth_process: Optional[QProcess] = None
+        self.setAcceptDrops(True)
         self.setWindowTitle("アカウント追加 / 編集")
-        self.resize(680, 360)
+        self.resize(780, 470)
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.name_edit = QLineEdit(profile.name if profile else "")
@@ -542,7 +546,7 @@ class AccountDialog(QDialog):
         self.platform.addItem("pixiv", "pixiv")
         self.auth_mode = QComboBox()
         self.auth_mode.addItem("認証なし", "none")
-        self.auth_mode.addItem("アプリ内Xログイン（アカウント別・推奨）", "managed_x")
+        self.auth_mode.addItem("アカウント別Cookie（推奨）", "managed_x")
         self.auth_mode.addItem("アプリ内pixiv連携（アカウント別・推奨）", "managed_pixiv")
         self.auth_mode.addItem("cookies.txt", "cookies_file")
         self.auth_mode.addItem("ブラウザCookie", "browser")
@@ -559,22 +563,37 @@ class AccountDialog(QDialog):
         form.addRow("認証方式", self.auth_mode)
         form.addRow("認証値", row)
         layout.addLayout(form)
+        self.x_guide = QLabel(
+            "推奨手順：①通常ブラウザでXへログイン → ②Netscape形式のcookies.txtを書き出す → "
+            "③ここへ取り込み。ファイルはこの画面へドラッグ＆ドロップもできます。"
+        )
+        self.x_guide.setObjectName("muted"); self.x_guide.setWordWrap(True)
+        layout.addWidget(self.x_guide)
         self.x_auth_actions = QHBoxLayout()
-        self.login_button = QPushButton("Xへログイン / 更新")
-        self.login_button.clicked.connect(self.open_x_login)
-        self.import_button = QPushButton("cookies.txtを取り込む")
+        self.browser_button = QPushButton("① ブラウザでXを開く")
+        self.browser_button.clicked.connect(self.open_external_x)
+        self.import_button = QPushButton("② cookies.txtを取り込む")
         self.import_button.clicked.connect(self.import_cookie)
-        self.test_button = QPushButton("X認証をテスト")
+        self.test_button = QPushButton("③ X認証をテスト")
         self.test_button.clicked.connect(self.test_x_auth)
+        self.login_button = QPushButton("アプリ内ログイン（予備）")
+        self.login_button.clicked.connect(self.open_x_login)
+        self.cookie_help_button = QPushButton("cookies.txtの作り方")
+        self.cookie_help_button.clicked.connect(self.show_x_cookie_help)
         self.pixiv_login_button = QPushButton("pixivへログイン / 更新")
         self.pixiv_login_button.clicked.connect(self.open_pixiv_login)
         self.pixiv_test_button = QPushButton("pixiv認証をテスト")
         self.pixiv_test_button.clicked.connect(self.test_pixiv_auth)
-        self.x_auth_actions.addWidget(self.login_button)
+        self.x_auth_actions.addWidget(self.browser_button)
         self.x_auth_actions.addWidget(self.import_button)
         self.x_auth_actions.addWidget(self.test_button)
         self.x_auth_actions.addStretch()
         layout.addLayout(self.x_auth_actions)
+        self.x_secondary_actions = QHBoxLayout()
+        self.x_secondary_actions.addWidget(self.cookie_help_button)
+        self.x_secondary_actions.addWidget(self.login_button)
+        self.x_secondary_actions.addStretch()
+        layout.addLayout(self.x_secondary_actions)
         self.pixiv_auth_actions = QHBoxLayout()
         self.pixiv_auth_actions.addWidget(self.pixiv_login_button)
         self.pixiv_auth_actions.addWidget(self.pixiv_test_button)
@@ -584,8 +603,8 @@ class AccountDialog(QDialog):
         self.auth_status.setObjectName("muted"); self.auth_status.setWordWrap(True)
         layout.addWidget(self.auth_status)
         note = QLabel(
-            "推奨方式はX・pixivともアカウントごとに認証とログイン領域を分離します。"
-            "従来のcookies.txt / ブラウザCookie / pixiv refresh tokenも互換用に利用できます。"
+            "取り込んだCookieはアカウントごとの専用領域へコピーします。元ファイルの場所やChromeの状態には依存しません。"
+            "Cookie値はログへ表示しません。アプリ内XログインはX側に拒否される場合があるため予備機能です。"
         )
         note.setObjectName("muted"); note.setWordWrap(True)
         layout.addWidget(note)
@@ -624,12 +643,17 @@ class AccountDialog(QDialog):
         self.auth_value.setEchoMode(QLineEdit.EchoMode.Password if is_token else QLineEdit.EchoMode.Normal)
         self.auth_value.setReadOnly(is_managed or is_managed_pixiv)
         self.browse.setEnabled(mode == "cookies_file")
+        self.browser_button.setEnabled(is_managed)
         self.login_button.setEnabled(is_managed)
         self.import_button.setEnabled(is_managed)
         self.test_button.setEnabled(is_managed and bool(self.engine))
         self.pixiv_login_button.setEnabled(is_managed_pixiv and bool(self.engine))
         self.pixiv_test_button.setEnabled(is_managed_pixiv and bool(self.engine))
-        for button in (self.login_button, self.import_button, self.test_button):
+        self.x_guide.setVisible(is_managed)
+        for button in (
+            self.browser_button, self.login_button, self.import_button,
+            self.test_button, self.cookie_help_button,
+        ):
             button.setVisible(is_managed)
         for button in (self.pixiv_login_button, self.pixiv_test_button):
             button.setVisible(is_managed_pixiv)
@@ -650,9 +674,29 @@ class AccountDialog(QDialog):
         path = managed_x_cookie_path(self.data_dir, self.profile_id)
         info = inspect_netscape_cookie_file(path)
         if info.get("x_auth"):
-            self.auth_status.setText(f"✓ アカウント専用Cookie保存済み：{path}")
+            identity = str(info.get("x_user_id") or self._profile_user_id or "")
+            suffix = f" / XユーザーID {identity}" if identity else ""
+            self.auth_status.setText(f"✓ アカウント専用Cookie保存済み{suffix}：{path}")
         else:
-            self.auth_status.setText("未ログインです。「Xへログイン / 更新」またはcookies.txtの取り込みを実行してください。")
+            self.auth_status.setText("未認証です。通常ブラウザでログインし、cookies.txtを取り込んでください。")
+
+    def open_external_x(self):
+        if QDesktopServices.openUrl(QUrl("https://x.com/home")):
+            self.auth_status.setText(
+                "ブラウザでXを開きました。使用するアカウントを確認し、Netscape形式のcookies.txtを書き出してください。"
+            )
+        else:
+            QMessageBox.warning(self, "Xを開けません", "通常ブラウザで https://x.com/home を開いてください。")
+
+    def show_x_cookie_help(self):
+        QMessageBox.information(
+            self,
+            "cookies.txtの作り方",
+            "1. 通常ブラウザで x.com を開き、使いたいアカウントへログインします。\n"
+            "2. Cookie書き出し拡張機能で、現在のx.comをNetscape形式のcookies.txtとして保存します。\n"
+            "3. この画面の「② cookies.txtを取り込む」で選ぶか、ファイルを画面へドロップします。\n\n"
+            "Cookieはログイン情報そのものです。チャットやGitHubへアップロードしないでください。",
+        )
 
     def open_x_login(self):
         try:
@@ -673,18 +717,55 @@ class AccountDialog(QDialog):
         )
         if not source:
             return
+        self._import_cookie_path(Path(source))
+
+    def _import_cookie_path(self, source: Path) -> bool:
         try:
+            source_info = inspect_netscape_cookie_file(Path(source))
+            detected_id = str(source_info.get("x_user_id") or "")
+            if self._profile_user_id and detected_id and self._profile_user_id != detected_id:
+                QMessageBox.warning(
+                    self,
+                    "別アカウントのCookieです",
+                    "この設定に保存済みのXユーザーIDと、取り込もうとしたCookieのIDが一致しません。\n\n"
+                    f"設定済み：{self._profile_user_id}\n取り込み：{detected_id}\n\n"
+                    "Cookieを書き出したXアカウントを確認してください。",
+                )
+                return False
             result = import_netscape_cookie_file(
                 Path(source), managed_x_cookie_path(self.data_dir, self.profile_id)
             )
+            if detected_id:
+                self._profile_user_id = detected_id
+                self._identity_platform = "x"
             self._refresh_managed_status()
+            identity = f"\nXユーザーID：{detected_id}" if detected_id else "\nXユーザーIDはCookieから判定できませんでした。"
             QMessageBox.information(
                 self, "Cookie取り込み完了",
-                f"このアカウント専用として{result['cookie_count']}件を保存しました。",
+                f"このアカウント専用として{result['cookie_count']}件を保存しました。{identity}\n認証テストを続けます。",
             )
             self.test_x_auth()
+            return True
         except Exception as exc:
             QMessageBox.warning(self, "Cookieを取り込めません", str(exc))
+            return False
+
+    def dragEnterEvent(self, event):
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if (self.platform.currentData() == "x"
+                and self.auth_mode.currentData() == "managed_x"
+                and any(url.isLocalFile() and url.toLocalFile().lower().endswith(".txt") for url in urls)):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".txt"):
+                self._import_cookie_path(Path(url.toLocalFile()))
+                event.acceptProposedAction()
+                return
+        event.ignore()
 
     def open_pixiv_login(self):
         try:
@@ -798,7 +879,7 @@ class AccountDialog(QDialog):
                 QMessageBox.warning(
                     self,
                     "Xログインが必要です",
-                    "「Xへログイン / 更新」またはcookies.txtの取り込みを完了してから保存してください。",
+                    "通常ブラウザでXへログインし、cookies.txtの取り込みを完了してから保存してください。",
                 )
                 return
         if platform == "pixiv" and mode == "managed_pixiv":
@@ -818,12 +899,16 @@ class AccountDialog(QDialog):
             value = str(managed_x_cookie_path(self.data_dir, self.profile_id))
         elif mode == "managed_pixiv":
             value = str(managed_pixiv_cache_path(self.data_dir, self.profile_id))
+        platform = self.platform.currentData()
+        same_platform = platform == self._identity_platform
         return AccountProfile(
             profile_id=self.profile_id,
             name=self.name_edit.text().strip() or "未設定",
-            platform=self.platform.currentData(),
+            platform=platform,
             auth_mode=mode,
             auth_value=value,
+            user_id=self._profile_user_id if same_platform else "",
+            username=self._profile_username if same_platform else "",
         )
 
 
@@ -1712,7 +1797,7 @@ class MainWindow(QMainWindow):
         self.account_list = QListWidget(); self.account_list.currentRowChanged.connect(self.account_selected)
         self.account_list.setMaximumHeight(140)
         account_box.addWidget(self.account_list)
-        self.quick_x_login_btn = QPushButton("Xのログインを更新")
+        self.quick_x_login_btn = QPushButton("XのCookieを更新")
         self.quick_x_login_btn.clicked.connect(self.quick_x_login)
         self.pixiv_login_btn = QPushButton("pixivの連携を更新")
         self.pixiv_login_btn.clicked.connect(self.start_pixiv_oauth)
@@ -2315,30 +2400,14 @@ class MainWindow(QMainWindow):
                 self,
                 "Xログイン",
                 "このアカウントは従来方式です。「選択アカウントを編集」で、"
-                "認証方式を「アプリ内Xログイン」へ変更してください。",
+                "認証方式を「アカウント別Cookie」へ変更してください。",
             )
             return
-        try:
-            dialog = XLoginDialog(
-                self.data_dir,
-                account.profile_id,
-                managed_x_cookie_path(self.data_dir, account.profile_id),
-                self,
-            )
-            if dialog.exec() == QDialog.Accepted:
-                info = inspect_netscape_cookie_file(managed_x_cookie_path(self.data_dir, account.profile_id))
-                detected_id = str(info.get("x_user_id") or "")
-                if detected_id and account.user_id != detected_id:
-                    account.user_id = detected_id
-                    self.save_accounts()
-                self.refresh_accounts(account.profile_id)
-                QMessageBox.information(
-                    self,
-                    "Xログイン更新完了",
-                    "このアカウント専用Cookieを更新しました。自分のIDも自動で紐付けました。",
-                )
-        except Exception as exc:
-            QMessageBox.warning(self, "アプリ内Xログイン", str(exc))
+        dialog = AccountDialog(self, account, data_dir=self.data_dir, engine=self.engine_command())
+        if dialog.exec():
+            self.accounts[idx] = dialog.result_profile()
+            self.save_accounts()
+            self.refresh_accounts(account.profile_id)
 
     def edit_account(self):
         idx = self.account_list.currentRow()

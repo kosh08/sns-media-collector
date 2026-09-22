@@ -177,34 +177,39 @@ def write_netscape_cookie_file(path: Path, cookies: Iterable[BrowserCookie]) -> 
 
 
 def import_netscape_cookie_file(source: Path, destination: Path) -> dict:
-    """Validate and atomically copy an exported X cookie file into an account."""
+    """Validate an export and write only X cookies into an account's store."""
     source = Path(source)
     result = inspect_netscape_cookie_file(source)
     if not result.get("valid"):
         raise ValueError("cookies.txtを読み取れませんでした。Netscape形式で書き出してください。")
     if not result.get("x_auth"):
         raise ValueError("このファイルにXのauth_tokenがありません。x.comで書き出してください。")
-    destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = source.read_bytes()
-    handle, temporary = tempfile.mkstemp(prefix=destination.name + ".", suffix=".tmp", dir=destination.parent)
-    try:
-        with os.fdopen(handle, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+    records: list[BrowserCookie] = []
+    for original in source.read_text(encoding="utf-8", errors="replace").splitlines():
+        raw = original
+        if raw.startswith("#HttpOnly_"):
+            raw = raw[len("#HttpOnly_"):]
+        elif not raw or raw.startswith("#"):
+            continue
+        parts = raw.split("\t")
+        if len(parts) != 7:
+            continue
+        domain, _include, cookie_path, secure, expires, name, value = parts
+        if not domain.lower().lstrip(".").endswith(("x.com", "twitter.com")):
+            continue
         try:
-            os.chmod(temporary, 0o600)
-        except OSError:
-            pass
-        os.replace(temporary, destination)
-    except Exception:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
-    return inspect_netscape_cookie_file(destination)
+            expires_at = int(expires or 0)
+        except ValueError:
+            expires_at = 0
+        records.append(BrowserCookie(
+            domain=domain,
+            path=cookie_path or "/",
+            secure=secure.upper() == "TRUE",
+            expires=expires_at,
+            name=name,
+            value=value,
+        ))
+    return write_netscape_cookie_file(Path(destination), records)
 
 
 def classify_x_auth_test(returncode: int, output: str) -> tuple[bool, str]:
@@ -217,7 +222,7 @@ def classify_x_auth_test(returncode: int, output: str) -> tuple[bool, str]:
     if "failed to decrypt cookie" in text or "dpapi" in text:
         return False, (
             "ブラウザCookieをWindowsで復号できませんでした。"
-            "アプリ内Xログイン（推奨）を使ってください。"
+            "Chromeからcookies.txtを書き出し、アカウント別Cookieへ取り込んでください。"
         )
     if any(marker in text for marker in (
         "could not authenticate you", "authrequired", "authenticated cookies needed",

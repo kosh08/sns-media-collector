@@ -497,7 +497,7 @@ class Regressions(unittest.TestCase):
         expected = self.root / 'auth' / 'cookies' / f'x-{profile.profile_id}.txt'
         self.assertEqual(result.auth_mode, 'managed_x')
         self.assertEqual(Path(result.auth_value), expected)
-        self.assertIn('未ログイン', dialog.auth_status.text())
+        self.assertIn('未認証', dialog.auth_status.text())
         dialog.close()
         self.w.accounts = [result]
         self.w.save_accounts()
@@ -509,12 +509,61 @@ class Regressions(unittest.TestCase):
         dialog = AccountDialog(self.w, data_dir=self.root, engine=[sys.executable])
         self.assertEqual(dialog.platform.currentData(), 'x')
         self.assertEqual(dialog.auth_mode.currentData(), 'managed_x')
+        self.assertIn('ブラウザでXを開く', dialog.browser_button.text())
+        self.assertIn('cookies.txtを取り込む', dialog.import_button.text())
+        self.assertIn('作り方', dialog.cookie_help_button.text())
+        self.assertIn('予備', dialog.login_button.text())
+        self.assertTrue(dialog.acceptDrops())
         self.assertTrue(dialog.auth_value.isReadOnly())
         dialog.platform.setCurrentIndex(dialog.platform.findData('pixiv'))
         self.assertEqual(dialog.auth_mode.currentData(), 'managed_pixiv')
         self.assertTrue(dialog.auth_value.isReadOnly())
         dialog.platform.setCurrentIndex(dialog.platform.findData('x'))
         self.assertEqual(dialog.auth_mode.currentData(), 'managed_x')
+        dialog.close()
+
+    def test_account_edit_preserves_detected_identity(self):
+        from app import AccountDialog, AccountProfile
+        profile = AccountProfile(
+            'identity', 'x', 'managed_x', '', user_id='123456789',
+            username='example_user', profile_id='identity-profile',
+        )
+        dialog = AccountDialog(self.w, profile, data_dir=self.root, engine=[sys.executable])
+        dialog.name_edit.setText('renamed')
+        result = dialog.result_profile()
+        self.assertEqual(result.user_id, '123456789')
+        self.assertEqual(result.username, 'example_user')
+        dialog.close()
+
+    def test_cookie_import_detects_identity_and_blocks_cross_account_overwrite(self):
+        from app import AccountDialog, AccountProfile
+        from auth_store import inspect_netscape_cookie_file, managed_x_cookie_path
+
+        def exported(path, user_id, token):
+            path.write_text(
+                '# Netscape HTTP Cookie File\n'
+                f'#HttpOnly_.x.com\tTRUE\t/\tTRUE\t2000000000\tauth_token\t{token}\n'
+                f'.x.com\tTRUE\t/\tTRUE\t2000000000\ttwid\tu%3D{user_id}\n',
+                encoding='utf-8',
+            )
+
+        profile = AccountProfile(
+            'main', 'x', 'managed_x', '', user_id='111', profile_id='cookie-profile',
+        )
+        dialog = AccountDialog(self.w, profile, data_dir=self.root, engine=[sys.executable])
+        dialog.test_x_auth = lambda: None
+        matching = self.root / 'matching.txt'; exported(matching, '111', 'first-token')
+        with patch('app.QMessageBox.information'):
+            self.assertTrue(dialog._import_cookie_path(matching))
+        destination = managed_x_cookie_path(self.root, profile.profile_id)
+        self.assertEqual(inspect_netscape_cookie_file(destination)['x_user_id'], '111')
+        before = destination.read_bytes()
+
+        wrong = self.root / 'wrong.txt'; exported(wrong, '222', 'second-token')
+        with patch('app.QMessageBox.warning') as warning:
+            self.assertFalse(dialog._import_cookie_path(wrong))
+        self.assertEqual(destination.read_bytes(), before)
+        self.assertIn('一致しません', warning.call_args.args[2])
         dialog.close()
 
     def test_account_list_shows_managed_login_readiness(self):

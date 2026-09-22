@@ -63,14 +63,15 @@ class AuthStoreTests(unittest.TestCase):
             source.write_text(
                 "# Netscape HTTP Cookie File\n"
                 "#HttpOnly_.x.com\tTRUE\t/\tTRUE\t2000000000\tauth_token\tsecret\n"
-                ".x.com\tTRUE\t/\tTRUE\t2000000000\tct0\tcsrf\n",
+                ".x.com\tTRUE\t/\tTRUE\t2000000000\tct0\tcsrf\n"
+                ".example.com\tTRUE\t/\tTRUE\t2000000000\tprivate\tnot-for-x\n",
                 encoding="utf-8",
             )
             destination = managed_x_cookie_path(root, "profile-one")
             result = import_netscape_cookie_file(source, destination)
             self.assertTrue(result["x_auth"])
-            self.assertEqual(destination.read_bytes(), source.read_bytes())
             self.assertTrue(inspect_netscape_cookie_file(destination)["csrf"])
+            self.assertNotIn("example.com", destination.read_text(encoding="utf-8"))
 
     def test_managed_mode_uses_cookie_file_not_browser_decryption(self):
         cmd = build_x_likes_probe_command(
@@ -95,7 +96,7 @@ class AuthStoreTests(unittest.TestCase):
             1, "[cookies][warning] Failed to decrypt cookie (DPAPI)"
         )
         self.assertFalse(ok)
-        self.assertIn("アプリ内Xログイン", message)
+        self.assertIn("cookies.txt", message)
 
         self.assertEqual(
             classify_x_auth_test(0, "bookmark probe completed"),
