@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from recovery import find_recovery_candidate, restore_candidate
+from recovery import find_recovery_candidate, has_user_profile_data, restore_candidate
 
 
 class RecoveryTests(unittest.TestCase):
@@ -43,6 +43,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(found.path, source)
         self.assertEqual(found.account_count, 1)
         self.assertEqual(found.collection_count, 1)
+        self.assertFalse(has_user_profile_data(self.data))
+        self.assertTrue(has_user_profile_data(source))
 
     def test_restore_preserves_original_destination_and_backs_up_current_state(self):
         source = self.make_candidate()

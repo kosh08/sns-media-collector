@@ -27,7 +27,7 @@ from core import (
     parse_smc_post_line, write_post_markdown,
 )
 from collection_profiles import CollectionProfile, CollectionStore
-from recovery import find_recovery_candidate, restore_candidate
+from recovery import find_recovery_candidate, has_user_profile_data, restore_candidate
 
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QInputDialog,
@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.4"
+APP_VERSION = "0.4.5"
 
 
 def resolved_test_data_dir() -> str:
@@ -73,6 +73,19 @@ def is_ephemeral_test_path(value: str | Path) -> bool:
         normalized,
     )
     return bool(in_temp and marker)
+
+
+def resolved_application_data_dir(
+    test_data_dir: str, configured_value: str, home_dir: Path | None = None,
+) -> tuple[Path, str]:
+    """Return the usable data root and a leaked temporary root that was repaired."""
+    if test_data_dir:
+        return Path(test_data_dir), ""
+    default = Path(home_dir or Path.home()) / "SNSMediaCollector"
+    configured = Path(str(configured_value or default))
+    if is_ephemeral_test_path(configured):
+        return default, str(configured)
+    return configured, ""
 
 
 class UpdateCheckWorker(QThread):
@@ -1328,12 +1341,21 @@ class MainWindow(QMainWindow):
         test_data_dir = resolved_test_data_dir()
         self.settings = (QSettings(str(Path(test_data_dir) / "settings.ini"), QSettings.IniFormat)
                          if test_data_dir else QSettings("MasterTools", APP_NAME))
-        self.data_dir = Path(test_data_dir) if test_data_dir else Path(self.settings.value("data_dir", str(Path.home() / "SNSMediaCollector")))
+        configured_data_dir = str(self.settings.value("data_dir", str(Path.home() / "SNSMediaCollector")))
+        self.data_dir, self._repaired_data_root = resolved_application_data_dir(
+            test_data_dir, configured_data_dir,
+        )
+        if self._repaired_data_root:
+            self.settings.setValue("data_dir", str(self.data_dir))
+            self.settings.sync()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._recovery_report = None
         self._recovery_settings_error = ""
         if not test_data_dir:
-            candidate = find_recovery_candidate(self.data_dir)
+            # A valid canonical profile takes priority over a stranded temporary
+            # profile. This restores the user's original destinations instead of
+            # overwriting them with the later smoke-folder defaults.
+            candidate = None if has_user_profile_data(self.data_dir) else find_recovery_candidate(self.data_dir)
             if candidate is not None:
                 answer = QMessageBox.question(
                     self,
@@ -1428,6 +1450,18 @@ class MainWindow(QMainWindow):
                 f"復旧元: {report.source}\n"
                 f"復旧前バックアップ: {report.backup}\n\n"
                 "復旧元とバックアップは自動削除していません。取得設定と保存先を確認してから取得を再開してください。",
+            )
+        elif self._repaired_data_root:
+            self.log.append(
+                f"[DATA ROOT REPAIR] {self._repaired_data_root} を解除し、{self.data_dir} へ戻しました。"
+            )
+            self.footer_status.setText("検証用データフォルダを解除し、通常の設定へ戻しました")
+            QMessageBox.information(
+                self,
+                "通常のデータフォルダへ戻しました",
+                "検証用の一時フォルダがデータ保存先として残っていたため解除しました。\n\n"
+                f"現在のデータフォルダ: {self.data_dir}\n\n"
+                "既存のアカウントと取得設定を優先して読み込んでいます。保存先を確認してから取得を再開してください。",
             )
         restored_account_id = ""
         try:
@@ -2205,6 +2239,8 @@ class MainWindow(QMainWindow):
         # target_store defaults restored by sync_target_ui().
         self.dest_edit.setText(collection.destination or str(self.data_dir / "Library"))
         self.text_dest_edit.setText(collection.text_destination or str(Path(self.dest_edit.text()) / "text"))
+        if collection.destination:
+            self.target_status.setText("✓ この取得設定に保存先を登録済みです。")
         self.refresh_editor_heading()
 
     def collection_from_current(self, *, name: str, collection_id: str = "") -> CollectionProfile:
@@ -2469,6 +2505,15 @@ class MainWindow(QMainWindow):
         target = self.selected_target()
         if platform == "x" and target == "bookmarks":
             return normalize_target(platform, "self", target)
+        if (
+            platform == "pixiv" and target == "likes"
+            and self.scope_combo.currentData() == "self"
+        ):
+            return (
+                "https://www.pixiv.net/bookmark.php",
+                "pixiv:self:bookmarks",
+                "自分のブックマーク",
+            )
         raw = self.url_edit.text()
         if self.scope_combo.currentData() == "self":
             idx = self.account_combo.currentData()
@@ -2885,7 +2930,7 @@ class MainWindow(QMainWindow):
 
     def build_command(self) -> tuple[list[str], str]:
         platform = self.platform_combo.currentData(); target = self.selected_target()
-        url, target_key, target_name = normalize_target(platform, self.url_edit.text(), target)
+        url, target_key, target_name = self.current_target()
         dest = Path(self.dest_edit.text().strip()).expanduser()
         dest.mkdir(parents=True, exist_ok=True)
 

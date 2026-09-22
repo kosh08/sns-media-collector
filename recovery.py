@@ -97,6 +97,22 @@ def _recovered_ids(data_dir: Path) -> set[str]:
     return {str(x.get("candidate_id")) for x in values if isinstance(x, dict)}
 
 
+def has_user_profile_data(data_dir: Path) -> bool:
+    """Return true when the active folder already has real accounts or recipes."""
+    data_dir = Path(data_dir)
+    accounts = _json_value(data_dir / "accounts.json")
+    if isinstance(accounts, list) and any(
+        isinstance(item, dict) and item.get("profile_id") and item.get("name")
+        for item in accounts
+    ):
+        return True
+    raw_collections = _json_value(data_dir / "collections.json")
+    collections = raw_collections.get("items", []) if isinstance(raw_collections, dict) else raw_collections
+    return isinstance(collections, list) and any(
+        isinstance(item, dict) and item.get("collection_id") for item in collections
+    )
+
+
 def find_recovery_candidate(data_dir: Path, temp_root: Path | None = None) -> RecoveryCandidate | None:
     """Find the newest real user profile stranded in one of our smoke folders."""
     data_dir = Path(data_dir)

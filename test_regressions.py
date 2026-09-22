@@ -13,7 +13,7 @@ import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
-from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, resolved_test_data_dir, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
+from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, resolved_application_data_dir, resolved_test_data_dir, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
 from core import Catalog, LikeSeenRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 from collection_profiles import CollectionProfile
 APP = QApplication.instance() or QApplication([])
@@ -389,6 +389,54 @@ class Regressions(unittest.TestCase):
                 self.assertEqual(resolved_test_data_dir(), str(self.root))
 
         self.assertEqual(resolved_test_data_dir(), str(self.root))
+
+    def test_persisted_smoke_data_root_returns_to_canonical_folder(self):
+        leaked = r'C:\Users\SampleUser\AppData\Local\Temp\smc-smoke-example'
+        data_dir, repaired = resolved_application_data_dir(
+            '', leaked, Path('C:/Users/SampleUser'),
+        )
+        self.assertEqual(data_dir, Path('C:/Users/SampleUser/SNSMediaCollector'))
+        self.assertEqual(repaired, leaked)
+
+        explicit = Path('/opt/sample-user/CustomData')
+        data_dir, repaired = resolved_application_data_dir('', str(explicit), Path('/opt/sample-user'))
+        self.assertEqual(data_dir, explicit)
+        self.assertEqual(repaired, '')
+
+    def test_pixiv_self_bookmarks_need_no_user_id(self):
+        from app import AccountProfile
+        account = AccountProfile('ksk', 'pixiv', 'none', '')
+        self.w.accounts = [account]
+        self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        self.w.scope_combo.setCurrentIndex(self.w.scope_combo.findData('self'))
+        for button in self.w.target_buttons:
+            if button.property('key') == 'likes':
+                button.setChecked(True)
+                break
+        self.w.url_edit.clear()
+        self.w.sync_target_ui()
+
+        url, key, name = self.w.current_target()
+        self.assertEqual(url, 'https://www.pixiv.net/bookmark.php')
+        self.assertEqual(key, 'pixiv:self:bookmarks')
+        self.assertEqual(name, '自分のブックマーク')
+        command, _title = self.w.build_command()
+        self.assertEqual(command[-1], url)
+
+    def test_collection_destination_is_shown_as_registered(self):
+        from app import AccountProfile
+        account = AccountProfile('ksk', 'pixiv')
+        self.w.accounts = [account]
+        self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = CollectionProfile(
+            name='pixiv bookmarks', account_id=account.profile_id, platform='pixiv',
+            source='likes', destination=str(self.root / 'pixiv-downloads'),
+        )
+        self.w.collection_store.items = [collection]
+        self.w.collection_store.save()
+        self.w.refresh_collections(collection.collection_id)
+        self.assertEqual(self.w.dest_edit.text(), collection.destination)
+        self.assertIn('登録済み', self.w.target_status.text())
 
     def test_sidebar_only_shows_login_action_for_selected_service(self):
         from app import AccountProfile
