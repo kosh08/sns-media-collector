@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +24,20 @@ class CollectionProfileTests(unittest.TestCase):
             sessions = {"p1": {"target_type": "likes", "target": "@other", "destination": "D:/x"}}
             self.assertEqual(store.migrate_account_sessions([account], sessions), 1)
             self.assertEqual(store.items[0].target_scope, "other")
+            self.assertEqual(store.items[0].text_images_destination, "D:/x")
             self.assertEqual(store.migrate_account_sessions([account], sessions), 0)
+
+    def test_v1_collection_keeps_media_destination_for_combined_content(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "collections.json"
+            path.write_text(json.dumps({"version": 1, "items": [{
+                "name": "Legacy", "account_id": "acct", "platform": "x",
+                "destination": "D:/old-media", "text_destination": "D:/old-text",
+            }]}), encoding="utf-8")
+            item = CollectionStore(path).items[0]
+            self.assertEqual(item.destination, "D:/old-media")
+            self.assertEqual(item.text_images_destination, "D:/old-media")
+            self.assertEqual(item.text_destination, "D:/old-text")
 
     def test_other_requires_target_but_self_does_not(self):
         CollectionProfile("Self", "a", "x", target_scope="self").validate()

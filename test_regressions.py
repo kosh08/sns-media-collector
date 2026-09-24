@@ -378,15 +378,20 @@ class Regressions(unittest.TestCase):
         profile.destination = bad
         self.w.collection_store.items = [CollectionProfile(
             name='test', account_id='account', platform='x', destination=bad,
+            text_images_destination=bad + r'\text-media',
             text_destination=bad + r'\text',
         )]
         self.w.account_sessions = {'account': {'destination': bad}}
         self.w.settings.setValue('last_session', json.dumps({'destination': bad}))
 
-        self.assertEqual(self.w.repair_ephemeral_test_paths(), 5)
+        self.assertEqual(self.w.repair_ephemeral_test_paths(), 6)
         expected = str(self.root / 'Library')
         self.assertEqual(profile.destination, expected)
         self.assertEqual(self.w.collection_store.items[0].destination, expected)
+        self.assertEqual(
+            self.w.collection_store.items[0].text_images_destination,
+            str(self.root / 'Library' / 'text-media'),
+        )
         self.assertEqual(self.w.collection_store.items[0].text_destination, str(self.root / 'Library' / 'text'))
         self.assertEqual(self.w.account_sessions['account']['destination'], expected)
         self.assertEqual(json.loads(str(self.w.settings.value('last_session')))['destination'], expected)
@@ -759,13 +764,20 @@ class Regressions(unittest.TestCase):
         collection = self.w.collection_store.upsert(CollectionProfile(
             'いいね整理', account.profile_id, 'x', source='likes', target_scope='self',
             content_mode='text_images', review_mode='inbox',
-            destination=str(self.root / 'media'), text_destination=str(self.root / 'text'),
+            destination=str(self.root / 'media'),
+            text_images_destination=str(self.root / 'combined'),
+            text_destination=str(self.root / 'text'),
         ))
         self.w.refresh_collections(collection.collection_id)
         self.assertTrue(self.w.content_mode_combo.isEnabled())
         self.assertTrue(self.w.review_checkbox.isEnabled())
+        self.assertFalse(self.w.text_images_dest_row.isHidden())
         self.assertFalse(self.w.text_dest_row.isHidden())
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'media'))
+        self.assertEqual(self.w.text_images_dest_edit.text(), str(self.root / 'combined'))
+        self.assertEqual(self.w.text_dest_edit.text(), str(self.root / 'text'))
         self.assertEqual(self.w.content_mode_combo.currentData(), 'text_images')
+        self.assertEqual(self.w.current_content_destination(), self.root / 'combined')
         self.assertTrue(self.w.review_checkbox.isChecked())
         self.w.range_buttons['all'].setChecked(True)
         self.w.sync_target_ui()
@@ -774,6 +786,44 @@ class Regressions(unittest.TestCase):
         self.assertEqual(context['anchor_ids'], [])
         self.assertIn('SMC_POST', '\n'.join(command))
         self.assertEqual(self.w.start_btn.text(), '⬇ いいねを確認')
+
+    def test_review_choices_use_three_independent_destinations(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        image_dir = self.root / 'images only'
+        combined_dir = self.root / 'text and media'
+        text_dir = self.root / 'text only'
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            'いいね三分岐', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='images', review_mode='inbox', destination=str(image_dir),
+            text_images_destination=str(combined_dir), text_destination=str(text_dir),
+        ))
+        image_post = PostRecord('2086100000000000001', content='image', media_count=1)
+        combined_post = PostRecord('2086100000000000002', content='combined', media_count=1)
+        text_post = PostRecord('2086100000000000003', content='text', media_count=0)
+        records = [image_post, combined_post, text_post]
+        self.w.catalog.upsert_collection_posts(collection.collection_id, records)
+        self.w.queue_collection_posts(collection, records, {
+            image_post.post_id: 'images',
+            combined_post.post_id: 'text_images',
+            text_post.post_id: 'text',
+        })
+        jobs = [job for job in self.w.jobs if job.smc_context.get('job_kind') == 'collection_download']
+        self.assertEqual(len(jobs), 2)
+        by_mode = {job.smc_context['content_mode']: job for job in jobs}
+        self.assertEqual(Path(by_mode['images'].smc_context['destination']), image_dir)
+        self.assertEqual(Path(by_mode['text_images'].smc_context['destination']), combined_dir)
+        combined_row = self.w.catalog.conn.execute(
+            'SELECT markdown_path FROM collection_posts WHERE collection_id=? AND post_id=?',
+            (collection.collection_id, combined_post.post_id),
+        ).fetchone()
+        text_row = self.w.catalog.conn.execute(
+            'SELECT markdown_path FROM collection_posts WHERE collection_id=? AND post_id=?',
+            (collection.collection_id, text_post.post_id),
+        ).fetchone()
+        self.assertEqual(Path(combined_row[0]).parent, combined_dir)
+        self.assertEqual(Path(text_row[0]).parent, text_dir)
 
     def test_likes_probe_enters_inbox_with_text_and_advances_durable_boundary(self):
         from app import AccountProfile

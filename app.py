@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.7"
+APP_VERSION = "0.4.8"
 
 
 def resolved_test_data_dir() -> str:
@@ -1586,7 +1586,10 @@ class MainWindow(QMainWindow):
         self._session_timer.setSingleShot(True)
         self._session_timer.setInterval(300)
         self._session_timer.timeout.connect(self.save_session)
-        for widget in (self.url_edit, self.dest_edit, self.date_after_edit):
+        for widget in (
+            self.url_edit, self.dest_edit, self.text_images_dest_edit,
+            self.text_dest_edit, self.date_after_edit,
+        ):
             widget.textChanged.connect(lambda *_: self._session_timer.start())
         if getattr(sys, "frozen", False) and not test_data_dir:
             QTimer.singleShot(3000, lambda: self.check_for_updates(silent=True))
@@ -1606,6 +1609,7 @@ class MainWindow(QMainWindow):
         """Remove leaked CI/smoke-test destinations while preserving real user paths."""
         repaired = 0
         default_media = str(self.data_dir / "Library")
+        default_text_media = str(self.data_dir / "Library" / "text-media")
         default_text = str(self.data_dir / "Library" / "text")
 
         target_changed = False
@@ -1625,6 +1629,10 @@ class MainWindow(QMainWindow):
         for collection in self.collection_store.items:
             if is_ephemeral_test_path(collection.destination):
                 collection.destination = default_media
+                collection_changed = True
+                repaired += 1
+            if is_ephemeral_test_path(collection.text_images_destination):
+                collection.text_images_destination = default_text_media
                 collection_changed = True
                 repaired += 1
             if is_ephemeral_test_path(collection.text_destination):
@@ -1942,12 +1950,25 @@ class MainWindow(QMainWindow):
         self.review_checkbox = QCheckBox("取得後に確認箱で振り分ける")
         content_row.addWidget(self.review_checkbox); cl.addLayout(content_row)
 
-        dest_row = QHBoxLayout(); dest_row.addWidget(QLabel("保存先"))
+        self.images_dest_row = QWidget(); dest_row = QHBoxLayout(self.images_dest_row)
+        dest_row.setContentsMargins(0, 0, 0, 0)
+        self.images_dest_label = QLabel("保存先"); dest_row.addWidget(self.images_dest_label)
         self.dest_edit = QLineEdit(str(self.data_dir / "Library")); dest_row.addWidget(self.dest_edit, 1)
-        browse = QPushButton("変更"); browse.clicked.connect(self.pick_destination); dest_row.addWidget(browse); cl.addLayout(dest_row)
+        browse = QPushButton("変更"); browse.clicked.connect(self.pick_destination); dest_row.addWidget(browse)
+        cl.addWidget(self.images_dest_row)
+
+        self.text_images_dest_row = QWidget(); text_images_dest_layout = QHBoxLayout(self.text_images_dest_row)
+        text_images_dest_layout.setContentsMargins(0, 0, 0, 0)
+        text_images_dest_layout.addWidget(QLabel("本文＋画像・動画の保存先"))
+        self.text_images_dest_edit = QLineEdit(str(self.data_dir / "Library" / "text-media"))
+        text_images_dest_layout.addWidget(self.text_images_dest_edit, 1)
+        text_images_browse = QPushButton("変更")
+        text_images_browse.clicked.connect(self.pick_text_images_destination)
+        text_images_dest_layout.addWidget(text_images_browse)
+        self.text_images_dest_row.setVisible(False); cl.addWidget(self.text_images_dest_row)
 
         self.text_dest_row = QWidget(); text_dest_layout = QHBoxLayout(self.text_dest_row)
-        text_dest_layout.setContentsMargins(0, 0, 0, 0); text_dest_layout.addWidget(QLabel("本文の保存先"))
+        text_dest_layout.setContentsMargins(0, 0, 0, 0); text_dest_layout.addWidget(QLabel("本文のみの保存先"))
         self.text_dest_edit = QLineEdit(str(self.data_dir / "Library" / "text")); text_dest_layout.addWidget(self.text_dest_edit, 1)
         text_browse = QPushButton("変更"); text_browse.clicked.connect(self.pick_text_destination); text_dest_layout.addWidget(text_browse)
         self.text_dest_row.setVisible(False); cl.addWidget(self.text_dest_row)
@@ -2055,14 +2076,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "実保存", "この起動中に実在確認できた新規ファイルはまだありません。")
 
     def open_current_destination(self):
-        path = Path(self.dest_edit.text().strip()).expanduser()
+        path = self.current_content_destination()
         if path.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
         else:
             QMessageBox.information(self, "保存先", "保存先フォルダはまだ存在しません。")
 
     def seed_recent_from_current_destination(self):
-        root = Path(self.dest_edit.text().strip()).expanduser()
+        root = self.current_content_destination()
         if not root.exists():
             QMessageBox.information(self, "最近のダウンロード", "保存先フォルダが見つかりません。")
             return
@@ -2102,6 +2123,17 @@ class MainWindow(QMainWindow):
             dialog.exec()
         except Exception as exc:
             QMessageBox.warning(self, "最近のダウンロード", str(exc))
+
+    def current_content_destination(self) -> Path:
+        """Return the destination represented by the current content mode."""
+        mode = str(self.content_mode_combo.currentData() or "images")
+        if mode == "text_images" and not self.text_images_dest_row.isHidden():
+            value = self.text_images_dest_edit.text().strip()
+        elif mode == "text" and not self.text_dest_row.isHidden():
+            value = self.text_dest_edit.text().strip()
+        else:
+            value = self.dest_edit.text().strip()
+        return Path(value or self.data_dir / "Library").expanduser()
 
     def clear_recent_grid(self):
         if not hasattr(self, "recent_grid"):
@@ -2340,6 +2372,9 @@ class MainWindow(QMainWindow):
         # A collection's explicit destinations take precedence over legacy
         # target_store defaults restored by sync_target_ui().
         self.dest_edit.setText(collection.destination or str(self.data_dir / "Library"))
+        self.text_images_dest_edit.setText(
+            collection.text_images_destination or collection.destination or str(self.data_dir / "Library")
+        )
         self.text_dest_edit.setText(collection.text_destination or str(Path(self.dest_edit.text()) / "text"))
         if collection.destination:
             self.target_status.setText("✓ この取得設定に保存先を登録済みです。")
@@ -2358,6 +2393,9 @@ class MainWindow(QMainWindow):
             content_mode=str(self.content_mode_combo.currentData() or "images"),
             review_mode="inbox" if self.review_checkbox.isChecked() else "auto",
             destination=self.dest_edit.text().strip(),
+            text_images_destination=(
+                self.text_images_dest_edit.text().strip() or self.dest_edit.text().strip()
+            ),
             text_destination=self.text_dest_edit.text().strip() or str(Path(self.dest_edit.text().strip()) / "text"),
             range_mode=str(self.range_group.checkedButton().property("key")),
             date_after=self.date_after_edit.text().strip(),
@@ -2500,11 +2538,13 @@ class MainWindow(QMainWindow):
 
     def pick_destination(self):
         d = QFileDialog.getExistingDirectory(self, "保存先を選択", self.dest_edit.text())
-        if d:
-            old_default = str(Path(self.dest_edit.text().strip()) / "text")
-            self.dest_edit.setText(d)
-            if not self.text_dest_edit.text().strip() or self.text_dest_edit.text().strip() == old_default:
-                self.text_dest_edit.setText(str(Path(d) / "text"))
+        if d: self.dest_edit.setText(d)
+
+    def pick_text_images_destination(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "本文＋画像・動画の保存先を選択", self.text_images_dest_edit.text()
+        )
+        if d: self.text_images_dest_edit.setText(d)
 
     def pick_text_destination(self):
         d = QFileDialog.getExistingDirectory(self, "本文の保存先を選択", self.text_dest_edit.text())
@@ -2638,6 +2678,8 @@ class MainWindow(QMainWindow):
             if not is_x_reviewable:
                 self.content_mode_combo.setCurrentIndex(max(0, self.content_mode_combo.findData("images")))
                 self.review_checkbox.setChecked(False)
+            self.images_dest_label.setText("画像・動画のみの保存先" if is_x_reviewable else "保存先")
+            self.text_images_dest_row.setVisible(is_x_reviewable)
             self.text_dest_row.setVisible(is_x_reviewable)
         range_button = self.range_group.checkedButton() if hasattr(self, "range_group") else None
         range_mode = str(range_button.property("key")) if range_button else "incremental"
@@ -2700,10 +2742,14 @@ class MainWindow(QMainWindow):
                 )
         if profile and profile.destination:
             self.dest_edit.setText(profile.destination)
+            self.text_images_dest_edit.setText(profile.destination)
+            self.text_dest_edit.setText(str(Path(profile.destination) / "text"))
             self.chk_direct_folder.setChecked(profile.direct_folder)
             self.target_status.setText(self.target_status_text(profile))
         else:
             self.dest_edit.setText(str(self.data_dir / "Library"))
+            self.text_images_dest_edit.setText(str(self.data_dir / "Library" / "text-media"))
+            self.text_dest_edit.setText(str(self.data_dir / "Library" / "text"))
             self.chk_direct_folder.setChecked(True)
             self.target_status.setText("この取得対象の保存先はまだ未登録です。")
         if hasattr(self, "range_status"):
@@ -2903,6 +2949,7 @@ class MainWindow(QMainWindow):
             "collection_id": collection_id,
             "content_mode": content_mode,
             "review_mode": review_mode,
+            "text_images_destination": self.text_images_dest_edit.text().strip(),
             "text_destination": self.text_dest_edit.text().strip(),
             "date_after": date_after,
             "started_at": iso_utc(utc_now()),
@@ -3176,9 +3223,26 @@ class MainWindow(QMainWindow):
         account = next((a for a in self.accounts if a.profile_id == collection.account_id), None)
         if not account:
             raise ValueError("認証アカウントが見つかりません。")
-        destination = Path(collection.destination or self.data_dir / "Library")
-        destination.mkdir(parents=True, exist_ok=True)
-        media_records = [r for r in records if choices.get(r.post_id) in {"images", "text_images"} and r.media_count > 0]
+        destinations = {
+            "images": Path(collection.destination or self.data_dir / "Library").expanduser(),
+            "text_images": Path(
+                collection.text_images_destination
+                or collection.destination
+                or self.data_dir / "Library"
+            ).expanduser(),
+            "text": Path(
+                collection.text_destination
+                or Path(collection.destination or self.data_dir / "Library") / "text"
+            ).expanduser(),
+        }
+        media_groups = {
+            mode: [
+                rec for rec in records
+                if choices.get(rec.post_id) == mode and rec.media_count > 0
+            ]
+            for mode in ("images", "text_images")
+        }
+        media_records = media_groups["images"] + media_groups["text_images"]
         immediate = [r for r in records if r not in media_records]
         markdown_paths: dict[str, str] = {}
         for rec in records:
@@ -3187,7 +3251,7 @@ class MainWindow(QMainWindow):
             if choice in {"text", "text_images"}:
                 markdown_path = str(write_post_markdown(
                     rec,
-                    Path(collection.text_destination or destination / "text"),
+                    destinations[choice],
                     activity_label="いいね取得日時" if collection.source == "likes" else "ブックマーク日時",
                 ))
             markdown_paths[rec.post_id] = markdown_path
@@ -3214,27 +3278,39 @@ class MainWindow(QMainWindow):
                 target_key = f"x:bookmarks:{collection.collection_id}"
                 archive_scope = f"{target_key}:posts"
             profile = self.target_store.ensure(target_key, "x", collection.name)
-            base = core_build_command(
-                self.engine_command(), platform="x", url=media_records[0].source_url,
-                destination=destination, account_name=account.name,
-                auth_mode=account.auth_mode, auth_value=account.auth_value,
-                archive_scope=archive_scope, extensions=self.selected_extensions(),
-                capture_internal_metadata=True, use_archive=True,
-                archive_dir=self.data_dir / "archives", direct_folder=True,
-                range_mode="all", profile=profile, manual_date_after="", overlap_minutes=10,
-                hitomi_compat_x=True, target_type=collection.source,
-            )
-            command = append_urls(base, [r.source_url for r in media_records])
-            job = DownloadJob(f"X / {account.name} / {collection.name} / 振り分け済みメディア", command)
-            job.smc_context = {
-                "job_kind": "collection_download", "collection_id": collection.collection_id,
-                "collection_post_ids": [r.post_id for r in media_records], "platform": "x",
-                "target_key": target_key, "target_name": collection.name, "target_type": collection.source,
-                "destination": str(destination), "login_name": account.name,
-                "started_at": iso_utc(utc_now()), "started_epoch": time.time(),
-                "hitomi_compat": True, "direct_folder": True,
-            }
-            self.connect_job(job); self.jobs.append(job); self.queue_layout.addWidget(job)
+            queued_jobs = []
+            labels = {"images": "画像・動画のみ", "text_images": "本文＋画像・動画"}
+            for mode, group in media_groups.items():
+                if not group:
+                    continue
+                destination = destinations[mode]
+                destination.mkdir(parents=True, exist_ok=True)
+                base = core_build_command(
+                    self.engine_command(), platform="x", url=group[0].source_url,
+                    destination=destination, account_name=account.name,
+                    auth_mode=account.auth_mode, auth_value=account.auth_value,
+                    archive_scope=archive_scope, extensions=self.selected_extensions(),
+                    capture_internal_metadata=True, use_archive=True,
+                    archive_dir=self.data_dir / "archives", direct_folder=True,
+                    range_mode="all", profile=profile, manual_date_after="", overlap_minutes=10,
+                    hitomi_compat_x=True, target_type=collection.source,
+                )
+                command = append_urls(base, [r.source_url for r in group])
+                job = DownloadJob(
+                    f"X / {account.name} / {collection.name} / {labels[mode]}", command
+                )
+                job.smc_context = {
+                    "job_kind": "collection_download", "collection_id": collection.collection_id,
+                    "collection_post_ids": [r.post_id for r in group], "platform": "x",
+                    "target_key": target_key, "target_name": collection.name,
+                    "target_type": collection.source, "content_mode": mode,
+                    "destination": str(destination), "login_name": account.name,
+                    "started_at": iso_utc(utc_now()), "started_epoch": time.time(),
+                    "hitomi_compat": True, "direct_folder": True,
+                }
+                queued_jobs.append(job)
+            for job in queued_jobs:
+                self.connect_job(job); self.jobs.append(job); self.queue_layout.addWidget(job)
             if self.active_job is None: self.start_next_job()
         except Exception:
             for rec in media_records:

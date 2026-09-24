@@ -23,6 +23,7 @@ class CollectionProfile:
     content_mode: str = "images"  # images | text_images | text
     review_mode: str = "auto"  # auto | inbox
     destination: str = ""
+    text_images_destination: str = ""
     text_destination: str = ""
     range_mode: str = "incremental"
     date_after: str = ""
@@ -31,7 +32,12 @@ class CollectionProfile:
     @classmethod
     def from_dict(cls, value: dict) -> "CollectionProfile":
         fields = cls.__dataclass_fields__
-        return cls(**{k: v for k, v in value.items() if k in fields})
+        payload = {k: v for k, v in value.items() if k in fields}
+        # v1 stored one media destination plus one text destination. Preserve
+        # the media location for the new combined-content mode on upgrade.
+        if "text_images_destination" not in value:
+            payload["text_images_destination"] = str(value.get("destination") or "")
+        return cls(**payload)
 
     def validate(self) -> None:
         if self.platform not in {"x", "pixiv"}:
@@ -67,7 +73,7 @@ class CollectionStore:
             self.items = []
 
     def save(self) -> None:
-        atomic_write_json(self.path, {"version": 1, "items": [asdict(x) for x in self.items]})
+        atomic_write_json(self.path, {"version": 2, "items": [asdict(x) for x in self.items]})
 
     def get(self, collection_id: str) -> Optional[CollectionProfile]:
         return next((x for x in self.items if x.collection_id == collection_id), None)
@@ -123,6 +129,7 @@ class CollectionStore:
                 account_id=getattr(account, "profile_id", ""), platform=platform,
                 source=source, target_scope=scope, target_value=target_value,
                 destination=str(state.get("destination") or ""),
+                text_images_destination=str(state.get("destination") or ""),
                 range_mode=str(state.get("range_mode") or "incremental"),
                 date_after=str(state.get("date_after") or ""),
             ))
