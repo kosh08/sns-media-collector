@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.9"
+APP_VERSION = "0.4.10"
 
 
 def resolved_test_data_dir() -> str:
@@ -3627,24 +3627,48 @@ class MainWindow(QMainWindow):
                     if post:
                         post_records.append(post)
                 post_records = list({rec.post_id: rec for rec in post_records}.values())
-                if post_records:
-                    if ctx.get("scan_all"):
-                        date_after = str(ctx.get("date_after") or "")
-                        known_posts = self.catalog.collection_post_ids(
-                            str(ctx.get("collection_id") or "")
-                        )
-                        new_post_records = [
-                            rec for rec in post_records
-                            if rec.post_id not in known_posts
-                            and (not date_after or (rec.post_date or "")[:10] >= date_after)
+                if ctx.get("scan_all"):
+                    # Full review never depends on the incremental Likes anchor.
+                    # Normally gallery-dl emits one SMC_POST at each ``post``
+                    # event. Keep a media-only fallback so an upstream metadata
+                    # change cannot send this mode through the safe-stop branch.
+                    if not post_records and records:
+                        grouped: dict[str, list[LikeSeenRecord]] = {}
+                        for rec in records:
+                            grouped.setdefault(rec.post_id, []).append(rec)
+                        post_records = [
+                            PostRecord(
+                                post_id=items[0].post_id,
+                                author_id=items[0].author_id,
+                                author_name=items[0].author_name,
+                                post_date=items[0].post_date,
+                                collected_date=iso_utc(utc_now()),
+                                content="",
+                                media_count=len(items),
+                            )
+                            for items in grouped.values()
                         ]
-                        post_boundary = {
-                            "found": True, "records": new_post_records,
-                            "anchor_post_id": "",
-                        }
-                    else:
-                        post_boundary = find_bookmark_boundary(post_records, ctx.get("anchor_ids", []))
-                        new_post_records = list(post_boundary.get("records") or [])
+                    date_after = str(ctx.get("date_after") or "")
+                    known_posts = self.catalog.collection_post_ids(
+                        str(ctx.get("collection_id") or "")
+                    )
+                    new_post_records = [
+                        rec for rec in post_records
+                        if rec.post_id not in known_posts
+                        and (not date_after or (rec.post_date or "")[:10] >= date_after)
+                    ]
+                    new_ids = {rec.post_id for rec in new_post_records}
+                    new_records = [rec for rec in records if rec.post_id in new_ids]
+                    boundary = {
+                        "found": True,
+                        "anchor_post_id": "",
+                        "records_before_anchor": new_records,
+                        "new_posts": len(new_post_records),
+                        "new_media": len(new_records),
+                    }
+                elif post_records:
+                    post_boundary = find_bookmark_boundary(post_records, ctx.get("anchor_ids", []))
+                    new_post_records = list(post_boundary.get("records") or [])
                     new_ids = {rec.post_id for rec in new_post_records}
                     new_records = [rec for rec in records if rec.post_id in new_ids]
                     boundary = {

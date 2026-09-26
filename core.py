@@ -46,12 +46,12 @@ SMC_LIKE_SEEN_FORMAT = (
 # This powers Hitomi-style live thumbnails without writing sidecar files.
 SMC_FILE_FORMAT = "after:SMC_FILE\t{_path}"
 SMC_POST_FORMAT = (
-    "directory:SMC_POST\t{tweet_id}\t{author[id]}\t{author[name]!j}\t"
+    "post:SMC_POST\t{tweet_id}\t{author[id]}\t{author[name]!j}\t"
     "{date:%Y-%m-%dT%H:%M:%S%z}\t{date_bookmarked:%Y-%m-%dT%H:%M:%S%z}\t"
     "{content!j}\t{count}"
 )
 SMC_LIKE_POST_FORMAT = (
-    "directory:SMC_POST\t{tweet_id}\t{author[id]}\t{author[name]!j}\t"
+    "post:SMC_POST\t{tweet_id}\t{author[id]}\t{author[name]!j}\t"
     "{date:%Y-%m-%dT%H:%M:%S%z}\t\t{content!j}\t{count}"
 )
 

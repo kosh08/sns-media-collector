@@ -494,6 +494,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(cmd.count("-N"), 2)
         self.assertIn("extractor.twitter.text-tweets=true", cmd)
         self.assertIn("SMC_POST", "\n".join(cmd))
+        post_format = next(value for value in cmd if "SMC_POST" in value)
+        self.assertTrue(post_format.startswith("post:SMC_POST\t"))
+        self.assertFalse(post_format.startswith("directory:"))
 
     def test_anchor_boundary_only_returns_records_before_first_anchor(self):
         records = [

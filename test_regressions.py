@@ -931,6 +931,30 @@ class Regressions(unittest.TestCase):
         self.assertEqual(self.anchors(), before_anchor)
         self.assertIn('確認箱へ 1投稿', job.status.text())
 
+    def test_all_likes_media_only_fallback_never_requires_an_anchor(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '全いいね復旧', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='images', review_mode='inbox', destination=str(self.root / 'media'),
+        ))
+        job = DownloadJob('all likes fallback', [sys.executable])
+        job.smc_context = dict(
+            self.ctx, collection_id=collection.collection_id, scan_all=True,
+            content_mode='images', review_mode='inbox', use_archive=False,
+            anchor_ids=[], date_after='',
+        )
+        job.machine_lines = [line(NEW), line(SECOND)]
+        before_anchor = self.anchors()
+        self.w.job_finished(job, 0)
+        pending = self.w.catalog.collection_posts(collection.collection_id, state='pending')
+        self.assertEqual([rec.post_id for rec in pending], [NEW.post_id])
+        self.assertEqual(pending[0].media_count, 2)
+        self.assertEqual(self.anchors(), before_anchor)
+        self.assertIn('確認箱へ 1投稿', job.status.text())
+        self.assertNotIn('アンカー未検出', job.status.text())
+
     def test_likes_collection_media_failure_returns_post_to_inbox(self):
         from app import AccountProfile
         account = AccountProfile('main', 'x', user_id='123456789')

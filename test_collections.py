@@ -73,6 +73,8 @@ class BookmarkTests(unittest.TestCase):
         )
         self.assertIn("extractor.twitter.text-tweets=true", cmd)
         self.assertIn("--no-download", cmd)
+        post_format = next(value for value in cmd if "SMC_POST" in value)
+        self.assertTrue(post_format.startswith("post:SMC_POST\t"))
         self.assertEqual(cmd[-1], "https://x.com/i/bookmarks")
 
     def test_catalog_inbox_and_markdown_persist(self):
