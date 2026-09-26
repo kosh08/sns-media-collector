@@ -13,7 +13,7 @@ import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
-from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, resolved_application_data_dir, resolved_test_data_dir, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
+from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, ReviewInboxDialog, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, resolved_application_data_dir, resolved_test_data_dir, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
 from core import Catalog, LikeSeenRecord, PostRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
 from collection_profiles import CollectionProfile
 APP = QApplication.instance() or QApplication([])
@@ -997,4 +997,127 @@ class Regressions(unittest.TestCase):
             (collection.collection_id, post.post_id),
         ).fetchone()[0]
         self.assertEqual(state, 'pending')
+
+    def test_all_likes_scan_resumes_with_overlap_after_restart(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '履歴再開', account.profile_id, 'x', source='likes', target_scope='self',
+            review_mode='inbox', destination=str(self.root / 'media'), range_mode='all',
+            likes_scan_limit=10_000, likes_scan_next=501,
+        ))
+        self.w.refresh_collections(collection.collection_id)
+        command, _title, context = self.w.build_likes_probe(scan_all=True)
+        self.assertEqual((context['scan_resume_cursor'], context['scan_start'], context['scan_end']),
+                         (501, 476, 975))
+        self.assertEqual(command[command.index('--post-range') + 1], '476-975')
+
+    def test_all_likes_full_batch_persists_cursor_then_queues_next_overlap(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '履歴分割', account.profile_id, 'x', source='likes', target_scope='self',
+            review_mode='inbox', destination=str(self.root / 'media'), range_mode='all',
+            likes_scan_limit=10_000,
+        ))
+        job = DownloadJob('history 1-500', [sys.executable])
+        job.smc_context = dict(
+            self.ctx, collection_id=collection.collection_id, scan_all=True,
+            content_mode='images', review_mode='inbox', use_archive=False,
+            source_url='https://x.com/i/likes', auth_mode='none', auth_value='',
+            scan_total_limit=10_000, scan_resume_cursor=1, scan_start=1,
+            scan_end=500, scan_batch_size=500, date_after='',
+        )
+        job.machine_lines = [
+            f'SMC_POST\t{3000000000000000000 + i}\t1\t"artist"\t2026-09-20T00:00:00+0000\t\t"post {i}"\t0'
+            for i in range(500)
+        ]
+        self.w.job_finished(job, 0)
+        saved = self.w.collection_store.get(collection.collection_id)
+        self.assertEqual(saved.likes_scan_next, 501)
+        self.assertFalse(saved.likes_scan_complete)
+        self.assertEqual(self.w.catalog.pending_collection_post_count(collection.collection_id), 500)
+        continuation = [x for x in self.w.jobs if x.smc_context.get('scan_start') == 476]
+        self.assertEqual(len(continuation), 1)
+        self.assertEqual(continuation[0].smc_context['scan_end'], 975)
+        self.assertIn('続き', job.status.text())
+
+    def test_all_likes_short_batch_marks_complete_without_continuation(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '履歴末尾', account.profile_id, 'x', source='likes', target_scope='self',
+            review_mode='inbox', destination=str(self.root / 'media'), range_mode='all',
+            likes_scan_limit=10_000,
+        ))
+        job = DownloadJob('history tail', [sys.executable])
+        job.smc_context = dict(
+            self.ctx, collection_id=collection.collection_id, scan_all=True,
+            content_mode='images', review_mode='inbox', use_archive=False,
+            source_url='https://x.com/i/likes', auth_mode='none', auth_value='',
+            scan_total_limit=10_000, scan_resume_cursor=1, scan_start=1,
+            scan_end=500, scan_batch_size=500, date_after='',
+        )
+        job.machine_lines = [
+            'SMC_POST\t3000000000000000001\t1\t"artist"\t2026-09-20T00:00:00+0000\t\t"one"\t0',
+            'SMC_POST\t3000000000000000002\t1\t"artist"\t2026-09-19T00:00:00+0000\t\t"two"\t0',
+        ]
+        self.w.job_finished(job, 0)
+        saved = self.w.collection_store.get(collection.collection_id)
+        self.assertEqual(saved.likes_scan_next, 3)
+        self.assertTrue(saved.likes_scan_complete)
+        self.assertEqual(len(self.w.jobs), 0)
+        self.assertIn('末尾まで完了', job.status.text())
+
+    def test_cancelled_all_likes_batch_does_not_move_cursor(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '履歴停止', account.profile_id, 'x', source='likes', target_scope='self',
+            review_mode='inbox', destination=str(self.root / 'media'), range_mode='all',
+            likes_scan_limit=10_000, likes_scan_next=501,
+        ))
+        job = DownloadJob('cancelled history', [sys.executable])
+        job.cancelled = True
+        job.smc_context = dict(
+            self.ctx, collection_id=collection.collection_id, scan_all=True,
+            content_mode='images', review_mode='inbox', scan_total_limit=10_000,
+            scan_resume_cursor=501, scan_start=476, scan_end=975, scan_batch_size=500,
+        )
+        job.machine_lines = [
+            'SMC_POST\t3000000000000000001\t1\t"artist"\t2026-09-20T00:00:00+0000\t\t"one"\t0'
+        ]
+        self.w.job_finished(job, -3)
+        saved = self.w.collection_store.get(collection.collection_id)
+        self.assertEqual(saved.likes_scan_next, 501)
+        self.assertFalse(saved.likes_scan_complete)
+        self.assertEqual(self.w.catalog.pending_collection_post_count(collection.collection_id), 0)
+
+    def test_review_inbox_dialog_renders_only_one_page(self):
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            'ページ確認', 'acct', 'x', source='likes', review_mode='inbox',
+        ))
+        records = [
+            PostRecord(str(4000000000000000000 + i), content=f'post {i}')
+            for i in range(205)
+        ]
+        self.w.catalog.upsert_collection_posts(collection.collection_id, records)
+        dialog = ReviewInboxDialog(collection, self.w.catalog, self.w)
+        self.assertEqual(len(dialog.current_records), 100)
+        self.assertEqual(len(dialog.selectors), 100)
+        self.assertEqual(dialog.page_label.text(), '1–100 / 205件')
+        self.assertFalse(dialog.previous_btn.isEnabled())
+        self.assertTrue(dialog.next_btn.isEnabled())
+        dialog.next_page()
+        self.assertEqual(dialog.page_label.text(), '101–200 / 205件')
+        self.assertEqual(len(dialog.selectors), 100)
+        dialog.next_page()
+        self.assertEqual(dialog.page_label.text(), '201–205 / 205件')
+        self.assertEqual(len(dialog.selectors), 5)
+        self.assertFalse(dialog.next_btn.isEnabled())
+        dialog.close()
 if __name__ == '__main__': unittest.main(verbosity=2)

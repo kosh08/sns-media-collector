@@ -17,6 +17,29 @@ class CollectionProfileTests(unittest.TestCase):
             store.reorder([b.collection_id, a.collection_id])
             self.assertEqual([x.name for x in CollectionStore(store.path).items], ["B", "A"])
 
+    def test_likes_history_cursor_roundtrips_and_legacy_defaults_are_safe(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "collections.json"
+            store = CollectionStore(path)
+            item = store.upsert(CollectionProfile(
+                "History", "acct", "x", source="likes",
+                likes_scan_limit=10_000, likes_scan_next=2501,
+                likes_scan_complete=True,
+            ))
+            loaded = CollectionStore(path).get(item.collection_id)
+            self.assertEqual(loaded.likes_scan_limit, 10_000)
+            self.assertEqual(loaded.likes_scan_next, 2501)
+            self.assertTrue(loaded.likes_scan_complete)
+
+            path.write_text(json.dumps({"version": 2, "items": [{
+                "name": "Legacy", "account_id": "acct", "platform": "x",
+                "source": "likes",
+            }]}), encoding="utf-8")
+            legacy = CollectionStore(path).items[0]
+            self.assertEqual(legacy.likes_scan_limit, 300)
+            self.assertEqual(legacy.likes_scan_next, 1)
+            self.assertFalse(legacy.likes_scan_complete)
+
     def test_legacy_sessions_migrate_once(self):
         with tempfile.TemporaryDirectory() as td:
             store = CollectionStore(Path(td) / "collections.json")
@@ -88,6 +111,34 @@ class BookmarkTests(unittest.TestCase):
             catalog.set_collection_post_choice("c1", rec.post_id, "text", markdown_path=str(path))
             self.assertEqual(catalog.pending_collection_post_count("c1"), 0)
             self.assertIn("body", path.read_text(encoding="utf-8"))
+            catalog.close()
+
+    def test_catalog_inbox_pagination_has_no_overlap(self):
+        with tempfile.TemporaryDirectory() as td:
+            catalog = Catalog(Path(td) / "catalog.sqlite3")
+            records = [
+                PostRecord(str(1000 + i), collected_date=f"2026-09-26T00:{i // 60:02d}:{i % 60:02d}Z")
+                for i in range(205)
+            ]
+            catalog.upsert_collection_posts("c1", records)
+            first = catalog.collection_posts("c1", limit=100, offset=0)
+            second = catalog.collection_posts("c1", limit=100, offset=100)
+            third = catalog.collection_posts("c1", limit=100, offset=200)
+            self.assertEqual((len(first), len(second), len(third)), (100, 100, 5))
+            self.assertFalse({x.post_id for x in first} & {x.post_id for x in second})
+            self.assertFalse({x.post_id for x in second} & {x.post_id for x in third})
+            catalog.close()
+
+    def test_catalog_recovers_interrupted_queue_to_inbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            catalog = Catalog(Path(td) / "catalog.sqlite3")
+            record = PostRecord("1234567890123456789", content="recover me")
+            catalog.upsert_collection_posts("c1", [record])
+            catalog.set_collection_post_choice("c1", record.post_id, "images", state="queued")
+            self.assertEqual(catalog.pending_collection_post_count("c1"), 0)
+            self.assertEqual(catalog.recover_interrupted_collection_posts(), 1)
+            self.assertEqual(catalog.pending_collection_post_count("c1"), 1)
+            self.assertEqual(catalog.recover_interrupted_collection_posts(), 0)
             catalog.close()
 
 

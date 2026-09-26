@@ -27,6 +27,9 @@ class CollectionProfile:
     text_destination: str = ""
     range_mode: str = "incremental"
     date_after: str = ""
+    likes_scan_limit: int = 300
+    likes_scan_next: int = 1
+    likes_scan_complete: bool = False
     collection_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @classmethod
@@ -56,6 +59,9 @@ class CollectionProfile:
             self.content_mode = "images"
         if self.review_mode not in {"auto", "inbox"}:
             raise ValueError("振り分け方法の指定が不正です。")
+        self.likes_scan_limit = min(10_000, max(50, int(self.likes_scan_limit or 300)))
+        self.likes_scan_next = max(1, int(self.likes_scan_next or 1))
+        self.likes_scan_complete = bool(self.likes_scan_complete)
 
 
 class CollectionStore:
@@ -73,7 +79,7 @@ class CollectionStore:
             self.items = []
 
     def save(self) -> None:
-        atomic_write_json(self.path, {"version": 2, "items": [asdict(x) for x in self.items]})
+        atomic_write_json(self.path, {"version": 3, "items": [asdict(x) for x in self.items]})
 
     def get(self, collection_id: str) -> Optional[CollectionProfile]:
         return next((x for x in self.items if x.collection_id == collection_id), None)

@@ -498,6 +498,15 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(post_format.startswith("post:SMC_POST\t"))
         self.assertFalse(post_format.startswith("directory:"))
 
+    def test_review_probe_can_scan_a_later_post_window(self):
+        cmd = build_x_likes_probe_command(
+            ["gallery-dl"], url="https://x.com/me/likes",
+            auth_mode="none", auth_value="", max_media=500,
+            include_posts=True, start_index=501,
+        )
+        self.assertEqual(cmd[cmd.index("--post-range") + 1], "501-1000")
+        self.assertNotIn("--range", cmd)
+
     def test_anchor_boundary_only_returns_records_before_first_anchor(self):
         records = [
             LikeSeenRecord("4000000000000000001", 1, author_name="new1"),

@@ -1,12 +1,14 @@
-SNS Media Collector v0.3.12 validation
+SNS Media Collector v0.4.11 validation
 
 Local validation:
 - Python 3.10 syntax compatibility
-- Core/auth/release/updater/install-layout tests
-- 28 Qt/process/SQLite regressions
+- 85 core/auth/collection/recovery/release/updater/install-layout tests
+- 67 Qt/process/SQLite regressions in the Linux workspace
+- Split Likes history scan: persistence, overlap, resume, stop and end-of-list tests
+- Review inbox pagination and interrupted-queue recovery tests
 - Real gallery-dl save + archive skip test
 - Qt MainWindow startup smoke test
-- gallery-dl 1.32.12 X/pixiv extractor presence
+- gallery-dl 1.32.13 X/pixiv extractor presence
 
 The pixiv embedded-browser callback regression requires a working QtWebEngine
 runtime. It runs on the Windows release runner. The Linux workspace can skip

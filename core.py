@@ -731,22 +731,24 @@ def build_x_likes_anchor_command(
 
 def build_x_likes_probe_command(
     engine: list[str], *, url: str, auth_mode: str, auth_value: str,
-    max_media: int = 500, include_posts: bool = False,
+    max_media: int = 500, include_posts: bool = False, start_index: int = 1,
 ) -> list[str]:
     """No-download Likes probe, optionally including text-only post metadata."""
     limit = max(10, int(max_media))
+    start = max(1, int(start_index))
+    end = start + limit - 1
     cmd = list(engine) + ["--windows-filenames", "--no-input"]
     _append_auth(cmd, "x", auth_mode, auth_value)
     if include_posts:
         cmd += [
             "-o", "extractor.twitter.text-tweets=true",
-            "--post-range", f"1-{limit}",
+            "--post-range", f"{start}-{end}",
             "-N", SMC_LIKE_SEEN_FORMAT,
             "-N", SMC_LIKE_POST_FORMAT,
             url,
         ]
     else:
-        cmd += ["--range", f"1-{limit}", "-N", SMC_LIKE_SEEN_FORMAT, url]
+        cmd += ["--range", f"{start}-{end}", "-N", SMC_LIKE_SEEN_FORMAT, url]
     return cmd
 
 
@@ -1209,12 +1211,14 @@ class Catalog:
                 )
         return {"scanned": len(unique), "added": added}
 
-    def collection_posts(self, collection_id: str, *, state: str = "pending", limit: int = 500) -> list[PostRecord]:
+    def collection_posts(
+        self, collection_id: str, *, state: str = "pending", limit: int = 500, offset: int = 0,
+    ) -> list[PostRecord]:
         rows = self.conn.execute(
             """SELECT post_id,author_id,author_name,post_date,collected_date,content,media_count
                FROM collection_posts WHERE collection_id=? AND state=?
-               ORDER BY collected_date DESC, post_id DESC LIMIT ?""",
-            (collection_id, state, max(1, int(limit))),
+               ORDER BY collected_date DESC, post_id DESC LIMIT ? OFFSET ?""",
+            (collection_id, state, max(1, int(limit)), max(0, int(offset))),
         ).fetchall()
         return [PostRecord(*row) for row in rows]
 
@@ -1245,6 +1249,15 @@ class Catalog:
         else:
             row = self.conn.execute("SELECT COUNT(*) FROM collection_posts WHERE state='pending'").fetchone()
         return int(row[0] or 0)
+
+    def recover_interrupted_collection_posts(self) -> int:
+        """Return non-persistent download queue entries to the review inbox."""
+        with self.conn:
+            cursor = self.conn.execute(
+                "UPDATE collection_posts SET state='pending',updated_at=? WHERE state='queued'",
+                (iso_utc(utc_now()),),
+            )
+        return max(0, int(cursor.rowcount or 0))
 
     def upsert_x_event(
         self,

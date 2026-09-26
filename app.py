@@ -45,7 +45,10 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.10"
+APP_VERSION = "0.4.11"
+LIKES_HISTORY_BATCH_SIZE = 500
+LIKES_HISTORY_OVERLAP = 25
+REVIEW_INBOX_PAGE_SIZE = 100
 
 
 def resolved_test_data_dir() -> str:
@@ -1434,6 +1437,144 @@ class DownloadJob(QWidget):
         self.finished.emit(self, code)
 
 
+class ReviewInboxDialog(QDialog):
+    """Render a bounded page of pending posts instead of the entire inbox."""
+
+    def __init__(self, collection: CollectionProfile, catalog: Catalog, parent=None):
+        super().__init__(parent)
+        self.collection = collection
+        self.catalog = catalog
+        self.page_index = 0
+        self.current_records: list[PostRecord] = []
+        self.selectors: dict[str, QComboBox] = {}
+        self.setWindowTitle(f"確認箱 — {collection.name}")
+        self.resize(820, 650)
+
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            f"投稿ごとに保存方法を選べます。"
+            f"1ページ {REVIEW_INBOX_PAGE_SIZE}件ずつ表示します。"
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        self.bulk = QComboBox()
+        for text, key in [
+            ("このページ：指定なし", ""),
+            ("このページ：本文＋画像", "text_images"),
+            ("このページ：画像のみ", "images"),
+            ("このページ：本文のみ", "text"),
+            ("このページ：スキップ", "skip"),
+        ]:
+            self.bulk.addItem(text, key)
+        self.bulk.currentIndexChanged.connect(self._apply_bulk_choice)
+        layout.addWidget(self.bulk)
+
+        self.page_label = QLabel()
+        self.page_label.setObjectName("section")
+        layout.addWidget(self.page_label)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        layout.addWidget(self.scroll, 1)
+
+        navigation = QHBoxLayout()
+        self.previous_btn = QPushButton("◀ 前の100件")
+        self.next_btn = QPushButton("次の100件 ▶")
+        self.previous_btn.clicked.connect(self.previous_page)
+        self.next_btn.clicked.connect(self.next_page)
+        navigation.addWidget(self.previous_btn)
+        navigation.addStretch()
+        navigation.addWidget(self.next_btn)
+        layout.addLayout(navigation)
+
+        actions = QHBoxLayout()
+        cancel = QPushButton("閉じる")
+        apply_btn = QPushButton("このページを振り分け")
+        apply_btn.setObjectName("primary")
+        cancel.clicked.connect(self.reject)
+        apply_btn.clicked.connect(self.accept)
+        actions.addStretch()
+        actions.addWidget(cancel)
+        actions.addWidget(apply_btn)
+        layout.addLayout(actions)
+        self._load_page()
+
+    def choices(self) -> dict[str, str]:
+        return {post_id: str(combo.currentData()) for post_id, combo in self.selectors.items()}
+
+    def _apply_bulk_choice(self, _index: int) -> None:
+        choice = str(self.bulk.currentData() or "")
+        if not choice:
+            return
+        for selector in self.selectors.values():
+            index = selector.findData(choice)
+            if index >= 0:
+                selector.setCurrentIndex(index)
+
+    def _load_page(self) -> None:
+        total = self.catalog.pending_collection_post_count(self.collection.collection_id)
+        max_page = max(0, (total - 1) // REVIEW_INBOX_PAGE_SIZE)
+        self.page_index = min(max(0, self.page_index), max_page)
+        offset = self.page_index * REVIEW_INBOX_PAGE_SIZE
+        self.current_records = self.catalog.collection_posts(
+            self.collection.collection_id,
+            state="pending",
+            limit=REVIEW_INBOX_PAGE_SIZE,
+            offset=offset,
+        )
+        self.selectors = {}
+        holder = QWidget()
+        rows = QVBoxLayout(holder)
+        for rec in self.current_records:
+            frame = QFrame()
+            frame.setObjectName("card")
+            row = QVBoxLayout(frame)
+            title = QLabel(f"@{rec.author_name or rec.author_id}  ·  画像/動画 {rec.media_count}件")
+            title.setObjectName("section")
+            row.addWidget(title)
+            body = QLabel(rec.content or "（本文なし）")
+            body.setWordWrap(True)
+            body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.addWidget(body)
+            selector = QComboBox()
+            for label, key in [
+                ("本文＋画像", "text_images"),
+                ("画像のみ", "images"),
+                ("本文のみ", "text"),
+                ("スキップ", "skip"),
+            ]:
+                selector.addItem(label, key)
+            selector.setCurrentIndex(max(0, selector.findData(self.collection.content_mode)))
+            row.addWidget(selector)
+            self.selectors[rec.post_id] = selector
+            rows.addWidget(frame)
+        rows.addStretch()
+        previous_holder = self.scroll.takeWidget()
+        self.scroll.setWidget(holder)
+        if previous_holder is not None:
+            previous_holder.deleteLater()
+        self.bulk.blockSignals(True)
+        self.bulk.setCurrentIndex(0)
+        self.bulk.blockSignals(False)
+        start = offset + 1 if total else 0
+        end = offset + len(self.current_records)
+        self.page_label.setText(f"{start:,}–{end:,} / {total:,}件")
+        self.previous_btn.setEnabled(self.page_index > 0)
+        self.next_btn.setEnabled(end < total)
+        self.scroll.verticalScrollBar().setValue(0)
+
+    def previous_page(self) -> None:
+        if self.page_index > 0:
+            self.page_index -= 1
+            self._load_page()
+
+    def next_page(self) -> None:
+        total = self.catalog.pending_collection_post_count(self.collection.collection_id)
+        if (self.page_index + 1) * REVIEW_INBOX_PAGE_SIZE < total:
+            self.page_index += 1
+            self._load_page()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1502,6 +1643,7 @@ class MainWindow(QMainWindow):
         self.accounts: list[AccountProfile] = self.load_accounts()
         self.target_store = TargetStore(self.data_dir / "targets.json")
         self.catalog = Catalog(self.data_dir / "catalog.sqlite3")
+        self._recovered_collection_posts = self.catalog.recover_interrupted_collection_posts()
         self.jobs: list[DownloadJob] = []
         self.active_job: Optional[DownloadJob] = None
         self.last_saved_path: Optional[Path] = None
@@ -1529,6 +1671,11 @@ class MainWindow(QMainWindow):
         self.refresh_engine_status()
         self.refresh_recent_downloads()
         self.restore_session()
+        if self._recovered_collection_posts:
+            self.log.append(
+                f"[INBOX RECOVERY] 中断された {self._recovered_collection_posts:,}投稿を確認箱へ戻しました。"
+            )
+            self.refresh_inbox_count()
         if self._settings_repair_count:
             self.log.append(
                 f"[SETTINGS REPAIR] 検証用の一時保存先を {self._settings_repair_count} 箇所修復しました。"
@@ -1922,7 +2069,8 @@ class MainWindow(QMainWindow):
         self.likes_anchor_spin.setSuffix(" 投稿")
         likes_row.addWidget(self.likes_anchor_spin)
         likes_row.addWidget(QLabel("探索上限"))
-        self.likes_probe_spin = QSpinBox(); self.likes_probe_spin.setRange(50, 500); self.likes_probe_spin.setValue(300)
+        self.likes_probe_spin = QSpinBox(); self.likes_probe_spin.setRange(50, 10_000); self.likes_probe_spin.setValue(300)
+        self.likes_probe_spin.setSingleStep(100)
         self.likes_probe_spin.setSuffix(" 投稿")
         likes_row.addWidget(self.likes_probe_spin)
         likes_row.addStretch(); likes_box.addLayout(likes_row)
@@ -2368,6 +2516,7 @@ class MainWindow(QMainWindow):
         range_button = self.range_buttons.get(collection.range_mode, self.range_buttons["incremental"])
         range_button.setChecked(True)
         self.date_after_edit.setText(collection.date_after)
+        self.likes_probe_spin.setValue(collection.likes_scan_limit)
         self.sync_target_ui()
         profile = self.current_target_profile(create=False)
         self.chk_direct_folder.setChecked(profile.direct_folder if profile else True)
@@ -2388,10 +2537,26 @@ class MainWindow(QMainWindow):
             raise ValueError("先に認証アカウントを選択してください。")
         account = self.accounts[idx]
         scope = str(self.scope_combo.currentData() or "self")
+        target_value = self.url_edit.text().strip() if scope == "other" else ""
+        range_mode = str(self.range_group.checkedButton().property("key"))
+        date_after = self.date_after_edit.text().strip()
+        previous = self.collection_store.get(collection_id) if collection_id else None
+        same_history = bool(
+            previous
+            and previous.account_id == account.profile_id
+            and previous.platform == str(self.platform_combo.currentData())
+            and previous.source == self.selected_target()
+            and previous.target_scope == scope
+            and previous.target_value == target_value
+            and not (
+                (previous.range_mode == "date" or range_mode == "date")
+                and (previous.range_mode != range_mode or previous.date_after != date_after)
+            )
+        )
         item = CollectionProfile(
             name=name.strip(), account_id=account.profile_id, platform=str(self.platform_combo.currentData()),
             source=self.selected_target(), target_scope=scope,
-            target_value=self.url_edit.text().strip() if scope == "other" else "",
+            target_value=target_value,
             content_mode=str(self.content_mode_combo.currentData() or "images"),
             review_mode="inbox" if self.review_checkbox.isChecked() else "auto",
             destination=self.dest_edit.text().strip(),
@@ -2399,8 +2564,11 @@ class MainWindow(QMainWindow):
                 self.text_images_dest_edit.text().strip() or self.dest_edit.text().strip()
             ),
             text_destination=self.text_dest_edit.text().strip() or str(Path(self.dest_edit.text().strip()) / "text"),
-            range_mode=str(self.range_group.checkedButton().property("key")),
-            date_after=self.date_after_edit.text().strip(),
+            range_mode=range_mode,
+            date_after=date_after,
+            likes_scan_limit=self.likes_probe_spin.value(),
+            likes_scan_next=previous.likes_scan_next if same_history and previous else 1,
+            likes_scan_complete=previous.likes_scan_complete if same_history and previous else False,
             collection_id=collection_id or uuid.uuid4().hex,
         )
         item.validate()
@@ -2802,6 +2970,18 @@ class MainWindow(QMainWindow):
         button = self.range_group.checkedButton() if hasattr(self, "range_group") else None
         mode = str(button.property("key")) if button else "incremental"
         if mode == "all":
+            collection = self.current_collection()
+            if collection and collection.platform == "x" and collection.source == "likes":
+                limit = self.likes_probe_spin.value()
+                if collection.likes_scan_complete:
+                    return "✓ Likesの末尾まで確認済みです。再実行すると先頭から重複を省いて再確認します。"
+                if collection.likes_scan_next > 1:
+                    resume = max(1, collection.likes_scan_next - LIKES_HISTORY_OVERLAP)
+                    return (
+                        f"✓ 分割走査の続き: {resume:,}投稿目付近から再開 / "
+                        f"確認済み位置 {collection.likes_scan_next - 1:,} / 上限 {limit:,}"
+                    )
+                return f"✓ 500投稿ずつ分割して最大{limit:,}投稿まで確認します。停止後も続きから再開できます。"
             return "✓ 過去まで確認します。保存済みのメディアは自動でスキップします。"
         if mode == "date":
             value = self.date_after_edit.text().strip() if hasattr(self, "date_after_edit") else ""
@@ -2928,14 +3108,28 @@ class MainWindow(QMainWindow):
             raise ValueError("投稿日は YYYY-MM-DD 形式で入力してください。")
         if (content_mode != "images" or review_mode == "inbox") and not collection_id:
             raise ValueError("本文保存または確認箱を使う場合は、先にこの内容を取得設定として保存してください。")
+        total_limit = self.likes_probe_spin.value()
+        if scan_all:
+            cursor = collection.likes_scan_next if collection else 1
+            if (collection and collection.likes_scan_complete) or cursor > total_limit:
+                cursor = 1
+            scan_start = max(1, cursor - LIKES_HISTORY_OVERLAP if cursor > 1 else 1)
+            scan_count = min(LIKES_HISTORY_BATCH_SIZE, total_limit - scan_start + 1)
+        else:
+            cursor = 1
+            scan_start = 1
+            scan_count = total_limit
+        scan_end = scan_start + scan_count - 1
         cmd = build_x_likes_probe_command(
             self.engine_command(), url=url, auth_mode=auth_mode, auth_value=auth_value,
-            max_media=self.likes_probe_spin.value(),
-            include_posts=(content_mode != "images" or review_mode == "inbox"),
+            max_media=scan_count,
+            include_posts=(scan_all or content_mode != "images" or review_mode == "inbox"),
+            start_index=scan_start,
         )
         title = (
             f"X / {account_name} / {target_name} / "
-            f"{'Likes一覧確認' if scan_all else 'Likes差分確認'}（DLなし）"
+            f"{'Likes一覧確認 ' + format(scan_start, ',') + '-' + format(scan_end, ',') if scan_all else 'Likes差分確認'}"
+            "（DLなし）"
         )
         ctx = {
             "job_kind": "likes_probe",
@@ -2948,6 +3142,12 @@ class MainWindow(QMainWindow):
             "auth_value": auth_value,
             "anchor_ids": anchor_ids,
             "scan_all": scan_all,
+            "source_url": url,
+            "scan_total_limit": total_limit,
+            "scan_resume_cursor": cursor,
+            "scan_start": scan_start,
+            "scan_end": scan_end,
+            "scan_batch_size": scan_count,
             "anchor_posts": max(1, int(profile.likes_anchor_posts or self.likes_anchor_spin.value())),
             "archive_scope": f"{target_key}:likes",
             "destination": self.dest_edit.text().strip(),
@@ -2966,6 +3166,68 @@ class MainWindow(QMainWindow):
         }
         return cmd, title, ctx
 
+    def make_likes_probe_job(self, cmd: list[str], title: str, ctx: dict) -> DownloadJob:
+        job = DownloadJob(title, cmd)
+        job.stop_on_post_ids = set(ctx.get("anchor_ids", []))
+        job.smc_context = ctx
+        self.connect_job(job)
+        return job
+
+    def enqueue_next_likes_history_batch(self, ctx: dict, next_cursor: int) -> bool:
+        total_limit = max(1, int(ctx.get("scan_total_limit") or 0))
+        if next_cursor > total_limit:
+            return False
+        scan_start = max(1, next_cursor - LIKES_HISTORY_OVERLAP)
+        scan_count = min(LIKES_HISTORY_BATCH_SIZE, total_limit - scan_start + 1)
+        scan_end = scan_start + scan_count - 1
+        next_ctx = dict(ctx)
+        next_ctx.update({
+            "scan_resume_cursor": next_cursor,
+            "scan_start": scan_start,
+            "scan_end": scan_end,
+            "scan_batch_size": scan_count,
+            "started_at": iso_utc(utc_now()),
+        })
+        cmd = build_x_likes_probe_command(
+            self.engine_command(),
+            url=str(next_ctx.get("source_url") or ""),
+            auth_mode=str(next_ctx.get("auth_mode") or "none"),
+            auth_value=str(next_ctx.get("auth_value") or ""),
+            max_media=scan_count,
+            include_posts=True,
+            start_index=scan_start,
+        )
+        title = (
+            f"X / {next_ctx.get('login_name', '認証なし')} / {next_ctx.get('target_name', '')} / "
+            f"Likes一覧確認 {scan_start:,}-{scan_end:,}（DLなし）"
+        )
+        next_job = self.make_likes_probe_job(cmd, title, next_ctx)
+        self.jobs.append(next_job)
+        self.queue_layout.addWidget(next_job)
+        self.log.append(
+            f"[LIKES CONTINUE] {scan_start:,}-{scan_end:,}投稿目を次の分割走査へ追加しました。"
+        )
+        return True
+
+    def advance_likes_history_scan(self, ctx: dict, observed_posts: int) -> dict:
+        collection = self.collection_store.get(str(ctx.get("collection_id") or ""))
+        if not collection or not ctx.get("scan_all") or "scan_start" not in ctx:
+            return {"continued": False, "complete": False, "next": 1}
+        start = max(1, int(ctx.get("scan_start") or 1))
+        end = max(start, int(ctx.get("scan_end") or start))
+        requested = max(1, int(ctx.get("scan_batch_size") or (end - start + 1)))
+        observed = max(0, int(observed_posts))
+        complete = observed < requested
+        next_cursor = start + observed if complete else end + 1
+        collection.likes_scan_next = max(1, next_cursor)
+        collection.likes_scan_complete = complete
+        collection.likes_scan_limit = min(10_000, max(50, int(ctx.get("scan_total_limit") or 300)))
+        self.collection_store.save()
+        continued = False
+        if not complete:
+            continued = self.enqueue_next_likes_history_batch(ctx, next_cursor)
+        return {"continued": continued, "complete": complete, "next": next_cursor}
+
     def enqueue_likes_probe(self, *, scan_all: bool = False):
         try:
             cmd, title, ctx = self.build_likes_probe(scan_all=scan_all)
@@ -2975,15 +3237,13 @@ class MainWindow(QMainWindow):
         if self.has_pending_likes_job(ctx.get("target_key", "")):
             QMessageBox.information(self, "Likes処理中", "この取得対象のLikes処理はすでにキューまたは実行中です。")
             return
-        job = DownloadJob(title, cmd)
-        job.stop_on_post_ids = set(ctx.get("anchor_ids", []))
-        job.smc_context = ctx
-        self.connect_job(job)
+        job = self.make_likes_probe_job(cmd, title, ctx)
         self.jobs.append(job)
         self.queue_layout.addWidget(job)
         self.log.append(
-            f"[LIKES PROBE] 最大{self.likes_probe_spin.value():,}投稿だけ確認し、"
-            + ("保存済み投稿を除いて確認箱／保存方針へ送ります。画像はまだDLしません。"
+            f"[LIKES PROBE] 最大{ctx.get('scan_total_limit', self.likes_probe_spin.value()):,}投稿を"
+            + (f"{ctx.get('scan_batch_size', 0):,}投稿ずつ分割確認し、保存済み投稿を除いて"
+               "確認箱／保存方針へ送ります。停止後は続きから再開します。画像はまだDLしません。"
                if scan_all else "アンカーに到達した時点で停止します。画像はまだDLしません。")
         )
         if self.active_job is None:
@@ -3344,38 +3604,12 @@ class MainWindow(QMainWindow):
         collection = self.current_collection()
         if not collection:
             return
-        records = self.catalog.collection_posts(collection.collection_id, state="pending")
-        if not records:
+        if not self.catalog.pending_collection_post_count(collection.collection_id):
             QMessageBox.information(self, "確認箱", "この取得設定に未振り分けの投稿はありません。"); return
-        dialog = QDialog(self); dialog.setWindowTitle(f"確認箱 — {collection.name}"); dialog.resize(820, 650)
-        layout = QVBoxLayout(dialog)
-        note = QLabel("投稿ごとに保存方法を選べます。上の一括指定も後から個別変更できます。")
-        note.setWordWrap(True); layout.addWidget(note)
-        bulk = QComboBox()
-        for text, key in [("一括指定なし", ""), ("すべて本文＋画像", "text_images"), ("すべて画像のみ", "images"), ("すべて本文のみ", "text"), ("すべてスキップ", "skip")]:
-            bulk.addItem(text, key)
-        layout.addWidget(bulk)
-        holder = QWidget(); rows = QVBoxLayout(holder); selectors = {}
-        for rec in records:
-            frame = QFrame(); frame.setObjectName("card"); row = QVBoxLayout(frame)
-            title = QLabel(f"@{rec.author_name or rec.author_id}  ·  画像/動画 {rec.media_count}件")
-            title.setObjectName("section"); row.addWidget(title)
-            text = QLabel(rec.content or "（本文なし）"); text.setWordWrap(True); text.setTextInteractionFlags(Qt.TextSelectableByMouse); row.addWidget(text)
-            select = QComboBox()
-            for label, key in [("本文＋画像", "text_images"), ("画像のみ", "images"), ("本文のみ", "text"), ("スキップ", "skip")]:
-                select.addItem(label, key)
-            select.setCurrentIndex(max(0, select.findData(collection.content_mode)))
-            row.addWidget(select); selectors[rec.post_id] = select; rows.addWidget(frame)
-        rows.addStretch()
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(holder); layout.addWidget(scroll, 1)
-        bulk.currentIndexChanged.connect(lambda _i: [s.setCurrentIndex(s.findData(bulk.currentData())) for s in selectors.values() if bulk.currentData()])
-        actions = QHBoxLayout(); cancel = QPushButton("閉じる"); apply_btn = QPushButton("振り分けを実行"); apply_btn.setObjectName("primary")
-        cancel.clicked.connect(dialog.reject); apply_btn.clicked.connect(dialog.accept)
-        actions.addStretch(); actions.addWidget(cancel); actions.addWidget(apply_btn); layout.addLayout(actions)
+        dialog = ReviewInboxDialog(collection, self.catalog, self)
         if dialog.exec() == QDialog.Accepted:
             try:
-                choices = {post_id: str(combo.currentData()) for post_id, combo in selectors.items()}
-                self.queue_collection_posts(collection, records, choices)
+                self.queue_collection_posts(collection, dialog.current_records, dialog.choices())
                 self.refresh_inbox_count()
             except Exception as exc:
                 QMessageBox.warning(self, "振り分け", str(exc))
@@ -3648,6 +3882,7 @@ class MainWindow(QMainWindow):
                             )
                             for items in grouped.values()
                         ]
+                    observed_post_count = len(post_records)
                     date_after = str(ctx.get("date_after") or "")
                     known_posts = self.catalog.collection_post_ids(
                         str(ctx.get("collection_id") or "")
@@ -3705,7 +3940,8 @@ class MainWindow(QMainWindow):
                     collection = self.collection_store.get(str(ctx.get("collection_id") or ""))
                     collection_flow = bool(
                         collection and (
-                            ctx.get("review_mode") == "inbox"
+                            ctx.get("scan_all")
+                            or ctx.get("review_mode") == "inbox"
                             or ctx.get("content_mode") != "images"
                         )
                     )
@@ -3753,6 +3989,22 @@ class MainWindow(QMainWindow):
                             job.status.setText(f"自動振り分け {len(durable_posts):,}投稿")
                         else:
                             job.status.setText("新規いいねなし")
+                        if ctx.get("scan_all"):
+                            history = self.advance_likes_history_scan(ctx, observed_post_count)
+                            if history["complete"]:
+                                job.status.setText(job.status.text() + " / 末尾まで完了")
+                                self.log.append(
+                                    f"[LIKES HISTORY COMPLETE] {history['next'] - 1:,}投稿目まで確認し、"
+                                    "タイムラインの末尾に到達しました。"
+                                )
+                            elif history["continued"]:
+                                job.status.setText(job.status.text() + " / 続きを待機")
+                            else:
+                                limit = int(ctx.get("scan_total_limit") or 0)
+                                job.status.setText(job.status.text() + f" / 上限 {limit:,}投稿まで完了")
+                                self.log.append(
+                                    f"[LIKES HISTORY LIMIT] 今回の探索上限 {limit:,}投稿まで確認しました。"
+                                )
                     elif not pending:
                         if new_records:
                             self.commit_likes_boundary(ctx, new_records)
