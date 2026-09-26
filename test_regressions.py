@@ -761,6 +761,9 @@ class Regressions(unittest.TestCase):
         from app import AccountProfile
         account = AccountProfile('main', 'x', user_id='123456789')
         self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        legacy = self.w.target_store.ensure('x:id:123456789', 'x', 'legacy target')
+        legacy.destination = str(self.root / 'wrong legacy default')
+        self.w.target_store.save()
         collection = self.w.collection_store.upsert(CollectionProfile(
             'いいね整理', account.profile_id, 'x', source='likes', target_scope='self',
             content_mode='text_images', review_mode='inbox',
@@ -781,9 +784,15 @@ class Regressions(unittest.TestCase):
         self.assertTrue(self.w.review_checkbox.isChecked())
         self.w.range_buttons['all'].setChecked(True)
         self.w.sync_target_ui()
+        self.assertEqual(self.w.dest_edit.text(), str(self.root / 'media'))
+        self.assertEqual(self.w.text_images_dest_edit.text(), str(self.root / 'combined'))
+        self.assertEqual(self.w.text_dest_edit.text(), str(self.root / 'text'))
         command, _title, context = self.w.build_likes_probe(scan_all=True)
         self.assertTrue(context['scan_all'])
         self.assertEqual(context['anchor_ids'], [])
+        self.assertEqual(context['destination'], str(self.root / 'media'))
+        self.assertEqual(context['text_images_destination'], str(self.root / 'combined'))
+        self.assertEqual(context['text_destination'], str(self.root / 'text'))
         self.assertIn('SMC_POST', '\n'.join(command))
         self.assertEqual(self.w.start_btn.text(), '⬇ いいねを確認')
 

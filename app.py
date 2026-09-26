@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.8"
+APP_VERSION = "0.4.9"
 
 
 def resolved_test_data_dir() -> str:
@@ -2369,6 +2369,8 @@ class MainWindow(QMainWindow):
         range_button.setChecked(True)
         self.date_after_edit.setText(collection.date_after)
         self.sync_target_ui()
+        profile = self.current_target_profile(create=False)
+        self.chk_direct_folder.setChecked(profile.direct_folder if profile else True)
         # A collection's explicit destinations take precedence over legacy
         # target_store defaults restored by sync_target_ui().
         self.dest_edit.setText(collection.destination or str(self.data_dir / "Library"))
@@ -2740,7 +2742,15 @@ class MainWindow(QMainWindow):
                     "Hitomi引継ぎ済みなら、最新の既存Tweetを初回基準にして10分前から再確認します。"
                     "保存済みは自動で省くので、基本は続きだけ取得します。"
                 )
-        if profile and profile.destination:
+        # A selected collection owns its three destination fields. UI refreshes
+        # happen for range changes, probe completion, and status updates, so
+        # copying legacy target defaults here would silently overwrite the
+        # collection paths and send the next download to the wrong directory.
+        collection = self.current_collection()
+        if collection:
+            if collection.destination:
+                self.target_status.setText("✓ この取得設定に保存先を登録済みです。")
+        elif profile and profile.destination:
             self.dest_edit.setText(profile.destination)
             self.text_images_dest_edit.setText(profile.destination)
             self.text_dest_edit.setText(str(Path(profile.destination) / "text"))
