@@ -796,6 +796,20 @@ class Regressions(unittest.TestCase):
         self.assertIn('SMC_POST', '\n'.join(command))
         self.assertEqual(self.w.start_btn.text(), '⬇ いいねを確認')
 
+    def test_all_likes_scan_requires_a_saved_collection(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        self.w.collection_list.setCurrentRow(-1)
+        self.w.target_buttons[2].setChecked(True)
+        self.w.range_buttons['all'].setChecked(True)
+        self.w.content_mode_combo.setCurrentIndex(
+            self.w.content_mode_combo.findData('images')
+        )
+        self.w.review_checkbox.setChecked(False)
+        with self.assertRaisesRegex(ValueError, '取得設定として保存'):
+            self.w.build_likes_probe(scan_all=True)
+
     def test_review_choices_use_three_independent_destinations(self):
         from app import AccountProfile
         account = AccountProfile('main', 'x', user_id='123456789')
@@ -833,6 +847,49 @@ class Regressions(unittest.TestCase):
         ).fetchone()
         self.assertEqual(Path(combined_row[0]).parent, combined_dir)
         self.assertEqual(Path(text_row[0]).parent, text_dir)
+
+    def test_collection_download_uses_extensions_captured_when_scan_started(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '開始時設定', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='images', review_mode='auto', destination=str(self.root / 'media'),
+        ))
+        post = PostRecord(NEW.post_id, media_count=1)
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [post])
+        self.w.chk_img.setChecked(False)
+        self.w.chk_video.setChecked(True)
+        self.w.chk_gif.setChecked(False)
+        self.w.queue_collection_posts(
+            collection, [post], {post.post_id: 'images'}, extensions=['jpg', 'png'],
+        )
+        queued = self.w.jobs[-1]
+        filter_value = queued.command[queued.command.index('--filter') + 1]
+        self.assertIn("'jpg'", filter_value)
+        self.assertIn("'png'", filter_value)
+        self.assertNotIn("'mp4'", filter_value)
+        self.assertEqual(queued.smc_context['extensions'], ['jpg', 'png'])
+
+    def test_collection_media_choice_rejects_empty_extension_selection(self):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x', user_id='123456789')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '媒体選択なし', account.profile_id, 'x', source='likes', target_scope='self',
+            content_mode='images', review_mode='inbox', destination=str(self.root / 'media'),
+        ))
+        post = PostRecord(NEW.post_id, media_count=1)
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [post])
+        with self.assertRaisesRegex(ValueError, '1つ以上'):
+            self.w.queue_collection_posts(
+                collection, [post], {post.post_id: 'images'}, extensions=[],
+            )
+        state = self.w.catalog.conn.execute(
+            'SELECT state FROM collection_posts WHERE collection_id=? AND post_id=?',
+            (collection.collection_id, post.post_id),
+        ).fetchone()[0]
+        self.assertEqual(state, 'pending')
 
     def test_likes_probe_enters_inbox_with_text_and_advances_durable_boundary(self):
         from app import AccountProfile
@@ -1119,5 +1176,34 @@ class Regressions(unittest.TestCase):
         self.assertEqual(dialog.page_label.text(), '201–205 / 205件')
         self.assertEqual(len(dialog.selectors), 5)
         self.assertFalse(dialog.next_btn.isEnabled())
+        dialog.close()
+
+    def test_review_inbox_keeps_changed_choices_across_pages(self):
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            'ページ選択保持', 'acct', 'x', source='likes', review_mode='inbox',
+        ))
+        records = [
+            PostRecord(str(5000000000000000000 + i), content=f'post {i}')
+            for i in range(205)
+        ]
+        self.w.catalog.upsert_collection_posts(collection.collection_id, records)
+        dialog = ReviewInboxDialog(collection, self.w.catalog, self.w)
+        first_id = dialog.current_records[0].post_id
+        dialog.selectors[first_id].setCurrentIndex(
+            dialog.selectors[first_id].findData('text')
+        )
+        dialog.next_page()
+        second_page_id = dialog.current_records[0].post_id
+        dialog.selectors[second_page_id].setCurrentIndex(
+            dialog.selectors[second_page_id].findData('skip')
+        )
+        dialog.previous_page()
+        self.assertEqual(dialog.selectors[first_id].currentData(), 'text')
+        choices = dialog.choices()
+        chosen_records = dialog.records_for_choices()
+        self.assertEqual(choices[first_id], 'text')
+        self.assertEqual(choices[second_page_id], 'skip')
+        self.assertEqual(len(choices), 101)
+        self.assertEqual({record.post_id for record in chosen_records}, set(choices))
         dialog.close()
 if __name__ == '__main__': unittest.main(verbosity=2)

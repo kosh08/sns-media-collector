@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.11"
+APP_VERSION = "0.4.12"
 LIKES_HISTORY_BATCH_SIZE = 500
 LIKES_HISTORY_OVERLAP = 25
 REVIEW_INBOX_PAGE_SIZE = 100
@@ -1447,6 +1447,9 @@ class ReviewInboxDialog(QDialog):
         self.page_index = 0
         self.current_records: list[PostRecord] = []
         self.selectors: dict[str, QComboBox] = {}
+        self._draft_choices: dict[str, str] = {}
+        self._draft_records: dict[str, PostRecord] = {}
+        self._dirty_post_ids: set[str] = set()
         self.setWindowTitle(f"確認箱 — {collection.name}")
         self.resize(820, 650)
 
@@ -1454,6 +1457,7 @@ class ReviewInboxDialog(QDialog):
         note = QLabel(
             f"投稿ごとに保存方法を選べます。"
             f"1ページ {REVIEW_INBOX_PAGE_SIZE}件ずつ表示します。"
+            "別ページで変更した選択も閉じるまで保持します。"
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -1489,7 +1493,7 @@ class ReviewInboxDialog(QDialog):
 
         actions = QHBoxLayout()
         cancel = QPushButton("閉じる")
-        apply_btn = QPushButton("このページを振り分け")
+        apply_btn = QPushButton("表示中＋変更済みを振り分け")
         apply_btn.setObjectName("primary")
         cancel.clicked.connect(self.reject)
         apply_btn.clicked.connect(self.accept)
@@ -1500,7 +1504,31 @@ class ReviewInboxDialog(QDialog):
         self._load_page()
 
     def choices(self) -> dict[str, str]:
-        return {post_id: str(combo.currentData()) for post_id, combo in self.selectors.items()}
+        self._remember_current_page()
+        selected = set(self.selectors) | self._dirty_post_ids
+        return {
+            post_id: choice
+            for post_id, choice in self._draft_choices.items()
+            if post_id in selected
+        }
+
+    def records_for_choices(self) -> list[PostRecord]:
+        choices = self.choices()
+        return [self._draft_records[post_id] for post_id in choices if post_id in self._draft_records]
+
+    def _remember_current_page(self) -> None:
+        for record in self.current_records:
+            selector = self.selectors.get(record.post_id)
+            if selector is not None:
+                self._draft_choices[record.post_id] = str(selector.currentData())
+                self._draft_records[record.post_id] = record
+
+    def _choice_changed(self, post_id: str) -> None:
+        selector = self.selectors.get(post_id)
+        if selector is None:
+            return
+        self._draft_choices[post_id] = str(selector.currentData())
+        self._dirty_post_ids.add(post_id)
 
     def _apply_bulk_choice(self, _index: int) -> None:
         choice = str(self.bulk.currentData() or "")
@@ -1544,9 +1572,14 @@ class ReviewInboxDialog(QDialog):
                 ("スキップ", "skip"),
             ]:
                 selector.addItem(label, key)
-            selector.setCurrentIndex(max(0, selector.findData(self.collection.content_mode)))
+            selected_choice = self._draft_choices.get(rec.post_id, self.collection.content_mode)
+            selector.setCurrentIndex(max(0, selector.findData(selected_choice)))
             row.addWidget(selector)
             self.selectors[rec.post_id] = selector
+            self._draft_records[rec.post_id] = rec
+            selector.currentIndexChanged.connect(
+                lambda _index, post_id=rec.post_id: self._choice_changed(post_id)
+            )
             rows.addWidget(frame)
         rows.addStretch()
         previous_holder = self.scroll.takeWidget()
@@ -1565,12 +1598,14 @@ class ReviewInboxDialog(QDialog):
 
     def previous_page(self) -> None:
         if self.page_index > 0:
+            self._remember_current_page()
             self.page_index -= 1
             self._load_page()
 
     def next_page(self) -> None:
         total = self.catalog.pending_collection_post_count(self.collection.collection_id)
         if (self.page_index + 1) * REVIEW_INBOX_PAGE_SIZE < total:
+            self._remember_current_page()
             self.page_index += 1
             self._load_page()
 
@@ -3101,13 +3136,21 @@ class MainWindow(QMainWindow):
             collection_id = collection.collection_id
         content_mode = str(self.content_mode_combo.currentData() or "images")
         review_mode = "inbox" if self.review_checkbox.isChecked() else "auto"
+        extensions = self.selected_extensions()
         range_button = self.range_group.checkedButton()
         range_mode = str(range_button.property("key")) if range_button else "incremental"
         date_after = self.date_after_edit.text().strip() if scan_all and range_mode == "date" else ""
         if date_after and not parse_iso(date_after):
             raise ValueError("投稿日は YYYY-MM-DD 形式で入力してください。")
+        if scan_all and not collection_id:
+            raise ValueError(
+                "『すべて確認』は分割位置と確認済み投稿を保存するため、"
+                "先にこの内容を取得設定として保存してください。"
+            )
         if (content_mode != "images" or review_mode == "inbox") and not collection_id:
             raise ValueError("本文保存または確認箱を使う場合は、先にこの内容を取得設定として保存してください。")
+        if review_mode == "auto" and content_mode != "text" and not extensions:
+            raise ValueError("画像・動画を保存する場合は、画像・動画・GIFを1つ以上選択してください。")
         total_limit = self.likes_probe_spin.value()
         if scan_all:
             cursor = collection.likes_scan_next if collection else 1
@@ -3151,7 +3194,7 @@ class MainWindow(QMainWindow):
             "anchor_posts": max(1, int(profile.likes_anchor_posts or self.likes_anchor_spin.value())),
             "archive_scope": f"{target_key}:likes",
             "destination": self.dest_edit.text().strip(),
-            "extensions": self.selected_extensions(),
+            "extensions": extensions,
             "capture_internal_metadata": self.chk_internal_meta.isChecked(),
             "use_archive": self.chk_archive.isChecked(),
             "direct_folder": self.chk_direct_folder.isChecked(),
@@ -3385,6 +3428,8 @@ class MainWindow(QMainWindow):
         account_name, auth_mode, auth_value = self.current_auth()
         self.ensure_auth_ready(auth_mode, auth_value)
         extensions = self.selected_extensions()
+        if not extensions:
+            raise ValueError("画像・動画・GIFを1つ以上選択してください。")
 
         profile = self.target_store.ensure(target_key, platform, target_name)
         if self.chk_remember_dest.isChecked():
@@ -3489,6 +3534,7 @@ class MainWindow(QMainWindow):
 
     def queue_collection_posts(
         self, collection: CollectionProfile, records: list[PostRecord], choices: dict[str, str],
+        *, extensions: Optional[list[str]] = None,
     ):
         account = next((a for a in self.accounts if a.profile_id == collection.account_id), None)
         if not account:
@@ -3514,6 +3560,9 @@ class MainWindow(QMainWindow):
         }
         media_records = media_groups["images"] + media_groups["text_images"]
         immediate = [r for r in records if r not in media_records]
+        media_extensions = list(extensions) if extensions is not None else self.selected_extensions()
+        if media_records and not media_extensions:
+            raise ValueError("画像・動画を保存する場合は、画像・動画・GIFを1つ以上選択してください。")
         markdown_paths: dict[str, str] = {}
         for rec in records:
             choice = choices.get(rec.post_id, "skip")
@@ -3559,7 +3608,7 @@ class MainWindow(QMainWindow):
                     self.engine_command(), platform="x", url=group[0].source_url,
                     destination=destination, account_name=account.name,
                     auth_mode=account.auth_mode, auth_value=account.auth_value,
-                    archive_scope=archive_scope, extensions=self.selected_extensions(),
+                    archive_scope=archive_scope, extensions=media_extensions,
                     capture_internal_metadata=True, use_archive=True,
                     archive_dir=self.data_dir / "archives", direct_folder=True,
                     range_mode="all", profile=profile, manual_date_after="", overlap_minutes=10,
@@ -3575,6 +3624,7 @@ class MainWindow(QMainWindow):
                     "target_key": target_key, "target_name": collection.name,
                     "target_type": collection.source, "content_mode": mode,
                     "destination": str(destination), "login_name": account.name,
+                    "extensions": media_extensions,
                     "started_at": iso_utc(utc_now()), "started_epoch": time.time(),
                     "hitomi_compat": True, "direct_folder": True,
                 }
@@ -3609,7 +3659,7 @@ class MainWindow(QMainWindow):
         dialog = ReviewInboxDialog(collection, self.catalog, self)
         if dialog.exec() == QDialog.Accepted:
             try:
-                self.queue_collection_posts(collection, dialog.current_records, dialog.choices())
+                self.queue_collection_posts(collection, dialog.records_for_choices(), dialog.choices())
                 self.refresh_inbox_count()
             except Exception as exc:
                 QMessageBox.warning(self, "振り分け", str(exc))
@@ -3985,7 +4035,12 @@ class MainWindow(QMainWindow):
                             )
                         elif durable_posts:
                             choices = {rec.post_id: str(ctx.get("content_mode") or "images") for rec in durable_posts}
-                            self.queue_collection_posts(collection, durable_posts, choices)
+                            self.queue_collection_posts(
+                                collection,
+                                durable_posts,
+                                choices,
+                                extensions=list(ctx.get("extensions") or []),
+                            )
                             job.status.setText(f"自動振り分け {len(durable_posts):,}投稿")
                         else:
                             job.status.setText("新規いいねなし")
