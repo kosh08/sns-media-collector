@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.12"
+APP_VERSION = "0.4.13"
 LIKES_HISTORY_BATCH_SIZE = 500
 LIKES_HISTORY_OVERLAP = 25
 REVIEW_INBOX_PAGE_SIZE = 100
@@ -3517,6 +3517,9 @@ class MainWindow(QMainWindow):
             return
         try:
             self.ensure_auth_ready(account.auth_mode, account.auth_value)
+            extensions = self.selected_extensions()
+            if collection.review_mode == "auto" and collection.content_mode != "text" and not extensions:
+                raise ValueError("画像・動画を保存する場合は、画像・動画・GIFを1つ以上選択してください。")
             command = build_x_bookmark_scan_command(
                 self.engine_command(), auth_mode=account.auth_mode, auth_value=account.auth_value,
                 max_posts=max(50, self.likes_probe_spin.value()),
@@ -3527,12 +3530,28 @@ class MainWindow(QMainWindow):
         job.smc_context = {
             "job_kind": "bookmark_scan", "collection_id": collection.collection_id,
             "login_name": account.name, "account_id": account.profile_id,
+            "extensions": extensions,
         }
         self.connect_job(job); self.jobs.append(job); self.queue_layout.addWidget(job)
         self.log.append("[BOOKMARKS] 最大件数まで本文・画像数を確認します。画像はまだダウンロードしません。")
         if self.active_job is None: self.start_next_job()
 
     def queue_collection_posts(
+        self, collection: CollectionProfile, records: list[PostRecord], choices: dict[str, str],
+        *, extensions: Optional[list[str]] = None,
+    ):
+        try:
+            self._prepare_collection_posts(collection, records, choices, extensions=extensions)
+        except Exception:
+            # Include validation and Markdown failures, not only command setup.
+            # Completed text/skip choices and unrelated jobs must remain untouched.
+            self.catalog.recover_collection_post_preparation(
+                collection.collection_id, [rec.post_id for rec in records],
+            )
+            self.refresh_inbox_count()
+            raise
+
+    def _prepare_collection_posts(
         self, collection: CollectionProfile, records: list[PostRecord], choices: dict[str, str],
         *, extensions: Optional[list[str]] = None,
     ):
@@ -3760,7 +3779,8 @@ class MainWindow(QMainWindow):
                 new_records = list(boundary["records"])
                 result = self.catalog.upsert_collection_posts(
                     collection.collection_id, new_records,
-                    pending=collection.review_mode == "inbox",
+                    # Keep every post recoverable until preparation succeeds.
+                    pending=True,
                 )
                 self.log.append(
                     f"[BOOKMARKS OK] 確認 {len(records):,}投稿 / 新規 {result['added']:,}投稿"
@@ -3770,7 +3790,10 @@ class MainWindow(QMainWindow):
                     self.refresh_inbox_count()
                 elif new_records:
                     choices = {r.post_id: collection.content_mode for r in new_records}
-                    self.queue_collection_posts(collection, new_records, choices)
+                    self.queue_collection_posts(
+                        collection, new_records, choices,
+                        extensions=list(ctx.get("extensions") or []),
+                    )
                     job.status.setText(f"自動振り分け {len(new_records):,}投稿")
                 else:
                     job.status.setText("新規ブックマークなし")
@@ -4023,7 +4046,7 @@ class MainWindow(QMainWindow):
                         result = self.catalog.upsert_collection_posts(
                             collection.collection_id,
                             durable_posts,
-                            pending=ctx.get("review_mode") == "inbox",
+                            pending=True,
                         )
                         if durable_posts and not ctx.get("scan_all"):
                             self.commit_likes_post_boundary(ctx, durable_posts, new_records)

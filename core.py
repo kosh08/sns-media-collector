@@ -1251,13 +1251,23 @@ class Catalog:
         return int(row[0] or 0)
 
     def recover_interrupted_collection_posts(self) -> int:
-        """Return non-persistent download queue entries to the review inbox."""
+        """Recover interrupted preparation and non-persistent download queues."""
         with self.conn:
             cursor = self.conn.execute(
-                "UPDATE collection_posts SET state='pending',updated_at=? WHERE state='queued'",
+                "UPDATE collection_posts SET state='pending',updated_at=? WHERE state IN ('ready','queued')",
                 (iso_utc(utc_now()),),
             )
         return max(0, int(cursor.rowcount or 0))
+
+    def recover_collection_post_preparation(self, collection_id: str, post_ids: Iterable[str]) -> None:
+        """Return only this failed preparation's unfinished posts to the inbox."""
+        now = iso_utc(utc_now())
+        with self.conn:
+            self.conn.executemany(
+                """UPDATE collection_posts SET state='pending',updated_at=?
+                   WHERE collection_id=? AND post_id=? AND state IN ('ready','queued')""",
+                [(now, collection_id, post_id) for post_id in post_ids],
+            )
 
     def upsert_x_event(
         self,

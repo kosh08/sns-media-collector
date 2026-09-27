@@ -141,6 +141,22 @@ class BookmarkTests(unittest.TestCase):
             self.assertEqual(catalog.recover_interrupted_collection_posts(), 0)
             catalog.close()
 
+    def test_restart_recovers_ready_posts_but_preserves_processed_and_choices(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "catalog.sqlite3"
+            catalog = Catalog(path)
+            catalog.upsert_collection_posts("c1", self.records(), pending=False)
+            catalog.set_collection_post_choice("c1", "101", "text_images", state="queued", markdown_path="saved.md")
+            catalog.set_collection_post_choice("c1", "102", "skip", state="processed")
+            catalog.close()
+            catalog = Catalog(path)
+            self.assertEqual(catalog.recover_interrupted_collection_posts(), 2)
+            self.assertEqual({r.post_id for r in catalog.collection_posts("c1")}, {"100", "101"})
+            row = catalog.conn.execute("SELECT choice,markdown_path FROM collection_posts WHERE post_id='101'").fetchone()
+            self.assertEqual(tuple(row), ("text_images", "saved.md"))
+            self.assertEqual(catalog.recover_interrupted_collection_posts(), 0)
+            catalog.close()
+
 
 if __name__ == "__main__":
     unittest.main()

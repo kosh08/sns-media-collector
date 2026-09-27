@@ -757,6 +757,93 @@ class Regressions(unittest.TestCase):
         self.assertEqual(self.w.catalog.pending_collection_post_count(collection.collection_id), 1)
         self.assertIn('1件', self.w.inbox_btn.text())
 
+    def bookmark_auto_fixture(self, content_mode='images'):
+        from app import AccountProfile
+        account = AccountProfile('main', 'x')
+        self.w.accounts = [account]; self.w.save_accounts(); self.w.refresh_accounts(account.profile_id)
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '自動保存', account.profile_id, 'x', source='bookmarks', review_mode='auto',
+            content_mode=content_mode, destination=str(self.root / 'media'),
+        ))
+        self.w.refresh_collections(collection.collection_id)
+        return collection
+
+    def bookmark_result(self, job):
+        job.machine_lines = [
+            'SMC_POST\t1234567890123456789\t42\t"artist"\t2026-01-02T03:04:05+0000\t'
+            '2026-02-03T04:05:06+0000\t"memo"\t1'
+        ]
+        self.w.job_finished(job, 0)
+
+    def test_bookmark_auto_download_keeps_scan_start_extensions(self):
+        self.bookmark_auto_fixture()
+        self.w.chk_img.setChecked(True); self.w.chk_video.setChecked(False); self.w.chk_gif.setChecked(False)
+        expected = self.w.selected_extensions()
+        self.w.enqueue_bookmark_scan()
+        scan = self.w.jobs[-1]
+        self.w.chk_img.setChecked(False); self.w.chk_video.setChecked(True)
+        self.bookmark_result(scan)
+        queued = self.w.jobs[-1]
+        self.assertIsNot(queued, scan)
+        self.assertEqual(queued.smc_context['extensions'], expected)
+        filter_value = queued.command[queued.command.index('--filter') + 1]
+        self.assertIn("'jpg'", filter_value)
+        self.assertNotIn("'mp4'", filter_value)
+
+    def test_bookmark_auto_rejects_empty_media_selection_before_scan(self):
+        self.bookmark_auto_fixture()
+        self.w.chk_img.setChecked(False); self.w.chk_video.setChecked(False); self.w.chk_gif.setChecked(False)
+        with patch('app.QMessageBox.warning') as warning:
+            self.w.enqueue_bookmark_scan()
+        self.assertEqual(len(self.w.jobs), 0)
+        warning.assert_called_once()
+
+    def test_bookmark_text_only_allows_no_media_and_writes_markdown(self):
+        collection = self.bookmark_auto_fixture('text')
+        self.w.chk_img.setChecked(False); self.w.chk_video.setChecked(False); self.w.chk_gif.setChecked(False)
+        self.w.enqueue_bookmark_scan()
+        self.bookmark_result(self.w.jobs[-1])
+        state, path = self.w.catalog.conn.execute(
+            'SELECT state,markdown_path FROM collection_posts WHERE collection_id=?',
+            (collection.collection_id,),
+        ).fetchone()
+        self.assertEqual(state, 'processed')
+        self.assertIn('memo', Path(path).read_text(encoding='utf-8'))
+
+    def test_bookmark_preparation_failure_stays_in_inbox_and_can_retry(self):
+        collection = self.bookmark_auto_fixture('text')
+        self.w.enqueue_bookmark_scan()
+        scan = self.w.jobs[-1]
+        with patch('app.write_post_markdown', side_effect=OSError('disk full')):
+            self.bookmark_result(scan)
+        self.assertEqual(self.w.catalog.pending_collection_post_count(collection.collection_id), 1)
+        self.assertIn('1件', self.w.inbox_btn.text())
+        records = self.w.catalog.collection_posts(collection.collection_id)
+        self.w.queue_collection_posts(collection, records, {r.post_id: 'text' for r in records})
+        self.assertEqual(self.w.catalog.pending_collection_post_count(collection.collection_id), 0)
+        path = self.w.catalog.conn.execute('SELECT markdown_path FROM collection_posts').fetchone()[0]
+        self.assertTrue(Path(path).is_file())
+
+    def test_partial_preparation_failure_recovers_only_unfinished_selected_posts(self):
+        collection = self.bookmark_auto_fixture()
+        records = [PostRecord(str(100 + i), content='body', media_count=1) for i in range(4)]
+        self.w.catalog.upsert_collection_posts(collection.collection_id, records, pending=False)
+        self.w.catalog.upsert_collection_posts('unrelated', [PostRecord('999')], pending=False)
+        from core import write_post_markdown
+        calls = 0
+        def fail_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError('disk full')
+            return write_post_markdown(*args, **kwargs)
+        with patch('app.write_post_markdown', side_effect=fail_second):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.w.queue_collection_posts(collection, records[:3], {'100': 'text', '101': 'images', '102': 'text'})
+        states = dict(self.w.catalog.conn.execute('SELECT post_id,state FROM collection_posts'))
+        self.assertEqual(states, {'100': 'processed', '101': 'pending', '102': 'pending', '103': 'ready', '999': 'ready'})
+        self.assertEqual(len(self.w.jobs), 0)
+
     def test_likes_content_controls_are_available(self):
         from app import AccountProfile
         account = AccountProfile('main', 'x', user_id='123456789')
