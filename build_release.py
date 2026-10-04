@@ -156,6 +156,7 @@ def main() -> int:
                  '--distpath', work / 'engine', '--workpath', work / 'engine-work',
                  '--specpath', work, ROOT / 'gallery_dl_launcher.py'], cwd=ROOT)
         pixiv_oauth_wait_self_test(work / 'engine' / 'gallery-dl.exe')
+        checked([work / 'engine' / 'gallery-dl.exe', '--smc-post-previews', '--version'])
         checked([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
                  '--windowed', '--name', 'SNSMediaCollectorUpdater',
                  '--distpath', work / 'updater', '--workpath', work / 'updater-work',
@@ -182,7 +183,7 @@ def main() -> int:
         (output / 'SHA256SUMS.txt').write_text(f'{digest}  {setup.name}\n', encoding='ascii')
         (output / 'release-check.json').write_text(json.dumps(dict(
             success=True, version=version, setup=setup.name, sha256=digest,
-            checks=['frozen app', 'updater helper', 'stable launcher', 'install', 'two-step upgrade',
+            checks=['frozen app', 'preview-enabled gallery-dl', 'updater helper', 'stable launcher', 'install', 'two-step upgrade',
                     'old-version cleanup', 'rollback retention', 'reinstall', 'installed app',
                     'uninstall preserves user data']), indent=2), encoding='utf-8')
     return 0

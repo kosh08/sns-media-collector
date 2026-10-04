@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
+from post_previews import PostPreview, parse_post_previews, post_previews_json
 
 MEDIA_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".gif",
@@ -48,11 +49,11 @@ SMC_FILE_FORMAT = "after:SMC_FILE\t{_path}"
 SMC_POST_FORMAT = (
     "post:SMC_POST\t{tweet_id}\t{author[id]}\t{author[name]!j}\t"
     "{date:%Y-%m-%dT%H:%M:%S%z}\t{date_bookmarked:%Y-%m-%dT%H:%M:%S%z}\t"
-    "{content!j}\t{count}"
+    "{content!j}\t{count}\t{smc_previews!j}"
 )
 SMC_LIKE_POST_FORMAT = (
     "post:SMC_POST\t{tweet_id}\t{author[id]}\t{author[name]!j}\t"
-    "{date:%Y-%m-%dT%H:%M:%S%z}\t\t{content!j}\t{count}"
+    "{date:%Y-%m-%dT%H:%M:%S%z}\t\t{content!j}\t{count}\t{smc_previews!j}"
 )
 
 
@@ -461,6 +462,7 @@ class PostRecord:
     collected_date: str = ""
     content: str = ""
     media_count: int = 0
+    previews: tuple[PostPreview, ...] = ()
 
     @property
     def source_url(self) -> str:
@@ -474,9 +476,9 @@ def parse_smc_post_line(line: str) -> Optional[PostRecord]:
     if not line.startswith(SMC_POST_PREFIX):
         return None
     parts = line.rstrip("\r\n").split("\t")
-    if len(parts) != 8 or parts[0] != "SMC_POST":
+    if len(parts) not in (8, 9) or parts[0] != "SMC_POST":
         return None
-    _, post_id, author_id, author_json, post_date, collected_date, content_json, media_count = parts
+    _, post_id, author_id, author_json, post_date, collected_date, content_json, media_count = parts[:8]
     try:
         int(post_id)
         author_name = json.loads(author_json)
@@ -486,7 +488,8 @@ def parse_smc_post_line(line: str) -> Optional[PostRecord]:
         return None
     if not isinstance(author_name, str) or not isinstance(content, str):
         return None
-    return PostRecord(post_id, author_id, author_name, post_date, collected_date, content, count)
+    previews = parse_post_previews(parts[8]) if len(parts) == 9 else ()
+    return PostRecord(post_id, author_id, author_name, post_date, collected_date, content, count, previews)
 
 
 def build_x_bookmark_scan_command(
@@ -494,7 +497,7 @@ def build_x_bookmark_scan_command(
 ) -> list[str]:
     """Collect bookmark metadata, including text-only posts, without media downloads."""
     limit = max(10, int(max_posts))
-    cmd = list(engine) + ["--windows-filenames", "--no-input"]
+    cmd = list(engine) + ["--smc-post-previews", "--windows-filenames", "--no-input"]
     _append_auth(cmd, "x", auth_mode, auth_value)
     cmd += [
         "-o", "extractor.twitter.text-tweets=true",
@@ -518,6 +521,13 @@ def find_bookmark_boundary(records: Iterable[PostRecord], known_post_ids: Iterab
                 "records": items[:index], "anchor_post_id": record.post_id,
             }
     return {"found": False, "first_run": False, "records": [], "anchor_post_id": ""}
+
+
+def build_x_post_preview_command(engine: list[str], record: PostRecord, *, auth_mode: str, auth_value: str) -> list[str]:
+    cmd = list(engine) + ["--smc-post-previews", "--windows-filenames", "--no-input"]
+    _append_auth(cmd, "x", auth_mode, auth_value)
+    return cmd + ["-o", "extractor.twitter.text-tweets=true", "--post-range", "1",
+                  "--print", SMC_LIKE_POST_FORMAT, "--no-download", record.source_url]
 
 
 def write_post_markdown(
@@ -740,6 +750,7 @@ def build_x_likes_probe_command(
     cmd = list(engine) + ["--windows-filenames", "--no-input"]
     _append_auth(cmd, "x", auth_mode, auth_value)
     if include_posts:
+        cmd.append("--smc-post-previews")
         cmd += [
             "-o", "extractor.twitter.text-tweets=true",
             "--post-range", f"{start}-{end}",
@@ -1176,6 +1187,11 @@ class Catalog:
         )
         self.conn.commit()
 
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_posts)")}
+        if "previews_json" not in columns:
+            self.conn.execute("ALTER TABLE collection_posts ADD COLUMN previews_json TEXT NOT NULL DEFAULT '[]'")
+            self.conn.commit()
+
     def close(self) -> None:
         self.conn.close()
 
@@ -1196,17 +1212,19 @@ class Catalog:
                 self.conn.execute(
                     """INSERT INTO collection_posts(
                          collection_id,post_id,author_id,author_name,post_date,collected_date,
-                         content,media_count,source_url,state,first_seen_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                         content,media_count,source_url,state,first_seen_at,updated_at,previews_json)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(collection_id,post_id) DO UPDATE SET
                          author_id=excluded.author_id,author_name=excluded.author_name,
                          post_date=excluded.post_date,collected_date=excluded.collected_date,
                          content=excluded.content,media_count=excluded.media_count,
-                         source_url=excluded.source_url,updated_at=excluded.updated_at""",
+                         source_url=excluded.source_url,updated_at=excluded.updated_at,
+                         previews_json=CASE WHEN excluded.previews_json='[]' THEN collection_posts.previews_json
+                                            ELSE excluded.previews_json END""",
                     (
                         collection_id, rec.post_id, rec.author_id, rec.author_name,
                         rec.post_date, rec.collected_date, rec.content, rec.media_count,
-                        rec.source_url, "pending" if pending else "ready", now, now,
+                        rec.source_url, "pending" if pending else "ready", now, now, post_previews_json(rec.previews),
                     ),
                 )
         return {"scanned": len(unique), "added": added}
@@ -1215,12 +1233,19 @@ class Catalog:
         self, collection_id: str, *, state: str = "pending", limit: int = 500, offset: int = 0,
     ) -> list[PostRecord]:
         rows = self.conn.execute(
-            """SELECT post_id,author_id,author_name,post_date,collected_date,content,media_count
+            """SELECT post_id,author_id,author_name,post_date,collected_date,content,media_count,previews_json
                FROM collection_posts WHERE collection_id=? AND state=?
                ORDER BY collected_date DESC, post_id DESC LIMIT ? OFFSET ?""",
             (collection_id, state, max(1, int(limit)), max(0, int(offset))),
         ).fetchall()
-        return [PostRecord(*row) for row in rows]
+        return [PostRecord(*row[:7], parse_post_previews(row[7])) for row in rows]
+
+    def update_collection_post_previews(self, collection_id: str, record: PostRecord) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE collection_posts SET previews_json=? WHERE collection_id=? AND post_id=?",
+                (post_previews_json(record.previews), collection_id, record.post_id),
+            )
 
     def collection_post_ids(self, collection_id: str) -> set[str]:
         return {str(row[0]) for row in self.conn.execute(

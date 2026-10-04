@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +18,7 @@ from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QImageReader, Q
 
 from core import (
     Catalog, LikeSeenRecord, PostRecord, TargetProfile, TargetStore, append_urls, archive_path_for, build_command as core_build_command,
-    build_x_bookmark_scan_command, find_bookmark_boundary,
+    build_x_bookmark_scan_command, build_x_post_preview_command, find_bookmark_boundary,
     build_x_likes_anchor_command, build_x_likes_probe_command, find_likes_anchor_boundary,
     import_hitomi_x_archive, import_x_likes_seen_archive, incremental_baseline, iso_utc,
     likes_post_urls, normalize_target, parse_iso, parse_smc_file_line, parse_smc_like_seen_line, parse_smc_x_meta_line,
@@ -28,6 +28,7 @@ from core import (
 )
 from collection_profiles import CollectionProfile, CollectionStore
 from recovery import find_recovery_candidate, has_user_profile_data, restore_candidate
+from inbox_previews import PreviewImageLoader, PreviewTile, LegacyPreviewResolver
 
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QInputDialog,
@@ -1461,7 +1462,7 @@ class NoWheelComboBox(QComboBox):
 class ReviewInboxDialog(QDialog):
     """Render a bounded page of pending posts instead of the entire inbox."""
 
-    def __init__(self, collection: CollectionProfile, catalog: Catalog, parent=None):
+    def __init__(self, collection: CollectionProfile, catalog: Catalog, parent=None, preview_command=None):
         super().__init__(parent)
         self.collection = collection
         self.catalog = catalog
@@ -1471,6 +1472,15 @@ class ReviewInboxDialog(QDialog):
         self._draft_choices: dict[str, str] = {}
         self._draft_records: dict[str, PostRecord] = {}
         self._dirty_post_ids: set[str] = set()
+        self.preview_loader = PreviewImageLoader(catalog.path.parent / "preview-cache", self)
+        self.preview_resolver = LegacyPreviewResolver(preview_command, self)
+        self.preview_resolver.ready.connect(self._preview_metadata_ready)
+        self.preview_resolver.failed.connect(self._preview_metadata_failed)
+        self.preview_rows = {}
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(80)
+        self.preview_timer.timeout.connect(self._load_visible_previews)
         self.setWindowTitle(f"確認箱 — {collection.name}")
         self.resize(820, 650)
 
@@ -1500,6 +1510,7 @@ class ReviewInboxDialog(QDialog):
         layout.addWidget(self.page_label)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.verticalScrollBar().valueChanged.connect(lambda _value: self.preview_timer.start())
         layout.addWidget(self.scroll, 1)
 
         navigation = QHBoxLayout()
@@ -1561,6 +1572,9 @@ class ReviewInboxDialog(QDialog):
                 selector.setCurrentIndex(index)
 
     def _load_page(self) -> None:
+        self.preview_loader.stop()
+        self.preview_resolver.stop()
+        self.preview_rows.clear()
         total = self.catalog.pending_collection_post_count(self.collection.collection_id)
         max_page = max(0, (total - 1) // REVIEW_INBOX_PAGE_SIZE)
         self.page_index = min(max(0, self.page_index), max_page)
@@ -1578,13 +1592,39 @@ class ReviewInboxDialog(QDialog):
             frame = QFrame()
             frame.setObjectName("card")
             row = QVBoxLayout(frame)
-            title = QLabel(f"@{rec.author_name or rec.author_id}  ·  画像/動画 {rec.media_count}件")
+            header = QHBoxLayout()
+            date = rec.post_date.replace("T", " ")[:16]
+            title = QLabel(f"@{rec.author_name or rec.author_id}  ·  {date}")
+            title.setTextFormat(Qt.PlainText)
             title.setObjectName("section")
-            row.addWidget(title)
+            header.addWidget(title, 1)
+            source = QPushButton("元投稿を開く ↗")
+            source.clicked.connect(lambda _checked=False, url=rec.source_url: QDesktopServices.openUrl(QUrl(url)))
+            header.addWidget(source)
+            row.addLayout(header)
             body = QLabel(rec.content or "（本文なし）")
+            body.setTextFormat(Qt.PlainText)
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextSelectableByMouse)
             row.addWidget(body)
+            if len(rec.content) > 320 or rec.content.count("\n") > 5:
+                short = "\n".join(rec.content[:320].splitlines()[:5]) + "…"
+                body.setText(short)
+                more = QPushButton("全文を表示")
+                more.setCheckable(True)
+                more.toggled.connect(lambda checked, label=body, text=rec.content, summary=short, button=more:
+                                     (label.setText(text if checked else summary),
+                                      button.setText("折りたたむ" if checked else "全文を表示"),
+                                      self.preview_timer.start()))
+                row.addWidget(more)
+            previews = QWidget()
+            preview_layout = QGridLayout(previews)
+            preview_layout.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(previews)
+            self.preview_rows[rec.post_id] = (previews, preview_layout, [])
+            self._fill_previews(rec)
+            choice_row = QHBoxLayout()
+            choice_row.addWidget(QLabel("保存方法"))
             selector = NoWheelComboBox()
             for label, key in [
                 ("本文＋画像", "text_images"),
@@ -1595,7 +1635,8 @@ class ReviewInboxDialog(QDialog):
                 selector.addItem(label, key)
             selected_choice = self._draft_choices.get(rec.post_id, self.collection.content_mode)
             selector.setCurrentIndex(max(0, selector.findData(selected_choice)))
-            row.addWidget(selector)
+            choice_row.addWidget(selector, 1)
+            row.addLayout(choice_row)
             self.selectors[rec.post_id] = selector
             self._draft_records[rec.post_id] = rec
             selector.currentIndexChanged.connect(
@@ -1616,6 +1657,73 @@ class ReviewInboxDialog(QDialog):
         self.previous_btn.setEnabled(self.page_index > 0)
         self.next_btn.setEnabled(end < total)
         self.scroll.verticalScrollBar().setValue(0)
+        self.preview_timer.start()
+
+    def _fill_previews(self, record):
+        widget, layout, tiles = self.preview_rows[record.post_id]
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        tiles.clear()
+        if record.previews:
+            for index, preview in enumerate(record.previews):
+                tile = PreviewTile(preview, self.preview_loader, widget)
+                tiles.append(tile)
+                layout.addWidget(tile, index // 2, index % 2)
+        else:
+            text = ("画像情報を読み込み待ち…" if record.media_count and self.preview_resolver.command
+                    else "画像情報がありません。元投稿から確認できます。" if record.media_count
+                    else "本文のみの投稿")
+            label = QLabel(text)
+            layout.addWidget(label)
+
+    def _load_visible_previews(self):
+        if not self.isVisible():
+            return
+        viewport = self.scroll.viewport()
+        for record in self.current_records:
+            widget, _layout, tiles = self.preview_rows[record.post_id]
+            top = widget.mapTo(viewport, widget.rect().topLeft()).y()
+            if top + widget.height() >= -100 and top <= viewport.height() + 100:
+                if tiles:
+                    for tile in tiles:
+                        tile.load()
+                elif record.media_count:
+                    self.preview_resolver.request(record)
+
+    def _preview_metadata_ready(self, record):
+        original = next((r for r in self.current_records if r.post_id == record.post_id), None)
+        if original is None:
+            return
+        updated = replace(original, previews=record.previews)
+        self.catalog.update_collection_post_previews(self.collection.collection_id, updated)
+        self.current_records = [updated if r.post_id == updated.post_id else r for r in self.current_records]
+        self._draft_records[updated.post_id] = updated
+        self._fill_previews(updated)
+        self.preview_timer.start()
+
+    def _preview_metadata_failed(self, post_id):
+        entry = self.preview_rows.get(post_id)
+        if entry:
+            label = entry[1].itemAt(0).widget()
+            if isinstance(label, QLabel):
+                label.setText("画像情報を取得できませんでした。元投稿から確認できます。")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.preview_timer.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "preview_timer"):
+            self.preview_timer.start()
+
+    def done(self, result):
+        self.preview_timer.stop()
+        self.preview_loader.stop()
+        self.preview_resolver.stop()
+        super().done(result)
 
     def previous_page(self) -> None:
         if self.page_index > 0:
@@ -3438,7 +3546,7 @@ class MainWindow(QMainWindow):
             for candidate in (base / "bin" / "gallery-dl.exe", base / "gallery-dl.exe"):
                 if candidate.exists():
                     return [str(candidate)]
-        return [sys.executable, "-m", "gallery_dl"]
+        return [sys.executable, str(Path(__file__).with_name("gallery_dl_launcher.py"))]
 
     def build_command(self) -> tuple[list[str], str]:
         platform = self.platform_combo.currentData(); target = self.selected_target()
@@ -3696,13 +3804,19 @@ class MainWindow(QMainWindow):
             return
         if not self.catalog.pending_collection_post_count(collection.collection_id):
             QMessageBox.information(self, "確認箱", "この取得設定に未振り分けの投稿はありません。"); return
-        dialog = ReviewInboxDialog(collection, self.catalog, self)
+        account = next((a for a in self.accounts if a.profile_id == collection.account_id and a.platform == "x"), None)
+        command = None
+        if account:
+            engine, mode, value = self.engine_command(), account.auth_mode, account.auth_value
+            command = lambda record: build_x_post_preview_command(engine, record, auth_mode=mode, auth_value=value)
+        dialog = ReviewInboxDialog(collection, self.catalog, self, preview_command=command)
         if dialog.exec() == QDialog.Accepted:
             try:
                 self.queue_collection_posts(collection, dialog.records_for_choices(), dialog.choices())
                 self.refresh_inbox_count()
             except Exception as exc:
                 QMessageBox.warning(self, "振り分け", str(exc))
+        dialog.deleteLater()
 
     def start_next_job(self):
         if self._closing:
@@ -4060,7 +4174,7 @@ class MainWindow(QMainWindow):
                         durable_posts = [
                             PostRecord(
                                 rec.post_id, rec.author_id, rec.author_name, rec.post_date,
-                                rec.collected_date or now, rec.content, rec.media_count,
+                                rec.collected_date or now, rec.content, rec.media_count, rec.previews,
                             )
                             for rec in new_post_records
                         ]

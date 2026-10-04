@@ -20,7 +20,7 @@ def main() -> int:
     print("Python 3.10 syntax compatibility: OK")
 
     suite = unittest.defaultTestLoader.loadTestsFromNames(
-        ["test_core", "test_auth_store", "test_collections", "test_recovery", "test_release", "test_updater", "test_install_layout"]
+        ["test_core", "test_auth_store", "test_collections", "test_post_previews", "test_recovery", "test_release", "test_updater", "test_install_layout"]
     )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
@@ -34,7 +34,7 @@ def main() -> int:
         print("Dependencies not installed here; startup smoke test skipped.")
         return 0
 
-    regressions = unittest.defaultTestLoader.loadTestsFromName("test_regressions")
+    regressions = unittest.defaultTestLoader.loadTestsFromNames(["test_regressions", "test_inbox_previews"])
     if not unittest.TextTestRunner(verbosity=2).run(regressions).wasSuccessful():
         return 16
     return subprocess.call([sys.executable, str(ROOT / "smoke_test.py")], cwd=str(ROOT))

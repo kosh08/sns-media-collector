@@ -8,6 +8,28 @@ import runpy
 import sys
 
 
+def enable_smc_post_previews() -> bool:
+    """Add image-only preview metadata without changing media counts or numbering."""
+    flag = "--smc-post-previews"
+    if flag not in sys.argv:
+        return False
+    sys.argv.remove(flag)
+    from gallery_dl.extractor.twitter import TwitterExtractor
+    from post_previews import tweet_preview_metadata
+    original = TwitterExtractor._transform_tweet
+    if getattr(original, "smc_previews_enabled", False):
+        return True
+
+    def transform(extractor, tweet):
+        metadata = original(extractor, tweet)
+        metadata["smc_previews"] = tweet_preview_metadata(tweet)
+        return metadata
+
+    transform.smc_previews_enabled = True
+    TwitterExtractor._transform_tweet = transform
+    return True
+
+
 SMC_PIXIV_STDIN_FLAG = "--smc-pixiv-stdin"
 
 
@@ -30,5 +52,6 @@ def enable_smc_pixiv_stdin() -> bool:
     return True
 
 if __name__ == "__main__":
+    enable_smc_post_previews()
     enable_smc_pixiv_stdin()
     runpy.run_module("gallery_dl", run_name="__main__")
