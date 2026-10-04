@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QSize, QThread, QTimer, QUrl, QUrlQuery, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QImageReader, QPixmap
+from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QImageReader, QPixmap, QWheelEvent
 
 from core import (
     Catalog, LikeSeenRecord, PostRecord, TargetProfile, TargetStore, append_urls, archive_path_for, build_command as core_build_command,
@@ -45,7 +45,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.13"
+APP_VERSION = "0.4.14"
 LIKES_HISTORY_BATCH_SIZE = 500
 LIKES_HISTORY_OVERLAP = 25
 REVIEW_INBOX_PAGE_SIZE = 100
@@ -1437,6 +1437,27 @@ class DownloadJob(QWidget):
         self.finished.emit(self, code)
 
 
+class NoWheelComboBox(QComboBox):
+    """Keep deliberate selections while allowing the surrounding view to scroll."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+        parent = self.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QScrollArea):
+                viewport = parent.viewport()
+                forwarded = QWheelEvent(
+                    viewport.mapFromGlobal(event.globalPosition().toPoint()).toPointF(),
+                    event.globalPosition(), event.pixelDelta(), event.angleDelta(),
+                    event.buttons(), event.modifiers(), event.phase(), event.inverted(),
+                )
+                QApplication.sendEvent(viewport, forwarded)
+                # A closed selector scrolls the inbox, even while focused.
+                event.accept()
+                return
+            parent = parent.parentWidget()
+
+
 class ReviewInboxDialog(QDialog):
     """Render a bounded page of pending posts instead of the entire inbox."""
 
@@ -1462,7 +1483,7 @@ class ReviewInboxDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        self.bulk = QComboBox()
+        self.bulk = NoWheelComboBox()
         for text, key in [
             ("このページ：指定なし", ""),
             ("このページ：本文＋画像", "text_images"),
@@ -1564,7 +1585,7 @@ class ReviewInboxDialog(QDialog):
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextSelectableByMouse)
             row.addWidget(body)
-            selector = QComboBox()
+            selector = NoWheelComboBox()
             for label, key in [
                 ("本文＋画像", "text_images"),
                 ("画像のみ", "images"),

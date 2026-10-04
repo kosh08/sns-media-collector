@@ -10,8 +10,9 @@ import time
 import unittest
 from unittest.mock import patch
 import shiboken6
-from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QCoreApplication, QEvent, QProcess, QSize, QUrl, QPoint, QPointF, Qt
+from PySide6.QtGui import QImage, QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from app import DARK_QSS, ElidedLabel, MainWindow, DownloadJob, ReviewInboxDialog, is_ephemeral_test_path, pixiv_callback_code, pixiv_oauth_command, resolved_application_data_dir, resolved_test_data_dir, sanitized_pixiv_oauth_diagnostic, scaled_media_pixmap
 from core import Catalog, LikeSeenRecord, PostRecord, atomic_write_json, partition_likes_records, import_x_likes_seen_archive, archive_path_for, snapshot_media_files
@@ -1264,6 +1265,57 @@ class Regressions(unittest.TestCase):
         self.assertEqual(len(dialog.selectors), 5)
         self.assertFalse(dialog.next_btn.isEnabled())
         dialog.close()
+
+    def test_review_inbox_wheel_scrolls_posts_without_changing_choice(self):
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            'ホイール誤操作', 'acct', 'x', source='likes', review_mode='inbox',
+        ))
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [
+            PostRecord(str(6000000000000000000 + i), content='本文') for i in range(20)
+        ])
+        dialog = ReviewInboxDialog(collection, self.w.catalog, self.w)
+        self.addCleanup(dialog.close)
+        dialog.show(); APP.processEvents()
+        selector = next(iter(dialog.selectors.values()))
+        selector.setFocus(); APP.processEvents()
+        previous = selector.currentData()
+        local = QPointF(selector.rect().center())
+        event = QWheelEvent(local, QPointF(selector.mapToGlobal(local.toPoint())),
+                            QPoint(), QPoint(0, -120), Qt.NoButton, Qt.NoModifier,
+                            Qt.NoScrollPhase, False)
+        APP.sendEvent(selector, event); APP.processEvents()
+        self.assertEqual(selector.currentData(), previous)
+        self.assertEqual(dialog._dirty_post_ids, set())
+        self.assertGreater(dialog.scroll.verticalScrollBar().value(), 0)
+        # Deliberate keyboard choices remain available.
+        QTest.keyClick(selector, Qt.Key_Down)
+        self.assertNotEqual(selector.currentData(), previous)
+        self.assertEqual(len(dialog._dirty_post_ids), 1)
+        selector.showPopup(); APP.processEvents()
+        view = selector.view()
+        index = selector.model().index(selector.findData('skip'), 0)
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualRect(index).center())
+        self.assertEqual(selector.currentData(), 'skip')
+
+    def test_review_inbox_bulk_choice_ignores_wheel_but_allows_explicit_selection(self):
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '一括ホイール', 'acct', 'x', source='likes', review_mode='inbox',
+        ))
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [PostRecord('1234567890123456789')])
+        dialog = ReviewInboxDialog(collection, self.w.catalog, self.w)
+        self.addCleanup(dialog.close)
+        dialog.show(); APP.processEvents()
+        for focused in (False, True):
+            (dialog.bulk.setFocus if focused else dialog.next_btn.setFocus)()
+            local = QPointF(dialog.bulk.rect().center())
+            event = QWheelEvent(local, QPointF(dialog.bulk.mapToGlobal(local.toPoint())),
+                                QPoint(), QPoint(0, -120), Qt.NoButton, Qt.NoModifier,
+                                Qt.NoScrollPhase, False)
+            APP.sendEvent(dialog.bulk, event); APP.processEvents()
+            self.assertEqual(dialog.bulk.currentData(), '')
+            self.assertEqual(dialog._dirty_post_ids, set())
+        dialog.bulk.setCurrentIndex(dialog.bulk.findData('text'))
+        self.assertEqual(next(iter(dialog.selectors.values())).currentData(), 'text')
 
     def test_review_inbox_keeps_changed_choices_across_pages(self):
         collection = self.w.collection_store.upsert(CollectionProfile(

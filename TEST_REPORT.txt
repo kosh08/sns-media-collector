@@ -1,9 +1,12 @@
-SNS Media Collector v0.4.13 validation
+SNS Media Collector v0.4.14 validation
 
 Local validation (Windows, Python 3.12.9, PySide6 6.11.2, gallery-dl 1.32.12):
 - Python 3.10 syntax compatibility
 - 86 core/auth/collection/recovery/release/updater/install-layout tests: PASS
-- 77 Qt/process/SQLite regressions, including QtWebEngine callback: PASS
+- 79 Qt/process/SQLite regressions, including QtWebEngine callback: PASS
+- Inbox wheel input keeps per-post choices and bulk choices unchanged
+- Wheel input over a focused selector scrolls the inbox without dirtying choices
+- Deliberate mouse and keyboard selection and bulk changes remain functional
 - Recovery of legacy ready posts after reopening the SQLite database
 - Bookmark scan-start media filter retention and empty-selection validation
 - Text-only bookmark output with no media selected
@@ -19,7 +22,7 @@ The pixiv embedded-browser callback regression requires a working QtWebEngine
 runtime. It runs on the Windows release runner. The Linux workspace can skip
 that one test when optional X11 runtime libraries are unavailable.
 
-Release validation (pending for v0.4.13):
+Release validation (pending for v0.4.14):
 The Windows workflow runs full_test.py before packaging, then verifies the
 frozen app, bundled gallery-dl, updater and stable launcher, installer creation,
 clean install, two-step upgrade, old-version cleanup, rollback-version retention,
