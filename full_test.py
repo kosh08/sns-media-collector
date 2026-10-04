@@ -20,7 +20,7 @@ def main() -> int:
     print("Python 3.10 syntax compatibility: OK")
 
     suite = unittest.defaultTestLoader.loadTestsFromNames(
-        ["test_core", "test_auth_store", "test_collections", "test_post_previews", "test_recovery", "test_release", "test_updater", "test_install_layout"]
+        ["test_core", "test_auth_store", "test_collections", "test_post_previews", "test_inbox_reset", "test_recovery", "test_release", "test_updater", "test_install_layout", "test_windows_taskbar"]
     )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():

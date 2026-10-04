@@ -43,8 +43,8 @@ Source: "{#BundleDir}\*"; DestDir: "{app}\versions\{#AppVersion}"; Flags: ignore
 Source: "{#LauncherExe}"; DestDir: "{app}"; DestName: "SNSMediaCollector.exe"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\SNS Media Collector"; Filename: "{app}\SNSMediaCollector.exe"; WorkingDir: "{app}"
-Name: "{userdesktop}\SNS Media Collector"; Filename: "{app}\SNSMediaCollector.exe"; WorkingDir: "{app}"
+Name: "{group}\SNS Media Collector"; Filename: "{app}\SNSMediaCollector.exe"; WorkingDir: "{app}"; AppUserModelID: "MasterTools.SNSMediaCollector.Desktop"
+Name: "{userdesktop}\SNS Media Collector"; Filename: "{app}\SNSMediaCollector.exe"; WorkingDir: "{app}"; AppUserModelID: "MasterTools.SNSMediaCollector.Desktop"
 
 [Run]
 Filename: "{app}\versions\{#AppVersion}\bin\SNSMediaCollectorUpdater.exe"; Parameters: "--cleanup-versions ""{app}\versions"" ""{#AppVersion}"""; Flags: runhidden waituntilterminated

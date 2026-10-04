@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, Signal, QByteArray, QBuffer, QIODevice, QPro
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtNetwork import QNetworkRequest, QNetworkReply
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
-from app import ReviewInboxDialog
+from app import ReviewInboxDialog, InboxResetDialog
 from collection_profiles import CollectionProfile
 from core import Catalog, PostRecord
 from inbox_previews import PreviewImageLoader, PreviewTile, LegacyPreviewResolver
@@ -247,3 +247,72 @@ class InboxPreviewTests(unittest.TestCase):
         self.assertNotIn(record.post_id, dialog.preview_rows)
         dialog.previous_page()
         self.assertEqual(dialog.selectors[record.post_id].currentData(), "skip")
+
+    def test_reset_dialog_has_two_exclusive_modes_and_safe_default(self):
+        confirm = InboxResetDialog(self.collection, 205, 300)
+        self.dialogs.append(confirm)
+        self.assertEqual(confirm.mode(), "empty")
+        confirm.reset_history.setChecked(True)
+        self.assertEqual(confirm.mode(), "history")
+        self.assertFalse(confirm.empty_only.isChecked())
+        self.assertTrue(any("205" in label.text() and "300" in label.text() for label in confirm.findChildren(QLabel)))
+        cancel = next(button for button in confirm.findChildren(QPushButton) if button.text() == "キャンセル")
+        self.assertTrue(cancel.isDefault())
+
+    def test_reset_cancel_keeps_records_choices_and_page(self):
+        dialog = self.dialog([PostRecord(str(1000+i)) for i in range(205)])
+        dialog.next_page()
+        post = dialog.current_records[0]
+        dialog.selectors[post.post_id].setCurrentIndex(dialog.selectors[post.post_id].findData("text"))
+        with patch.object(InboxResetDialog, "exec", return_value=QDialog.Rejected):
+            dialog._reset_inbox()
+        self.assertEqual(self.catalog.pending_collection_post_count("c"), 205)
+        self.assertEqual(dialog.page_index, 1)
+        self.assertEqual(dialog.choices()[post.post_id], "text")
+
+    def test_confirmed_reset_clears_all_pages_and_drafts_without_queuing(self):
+        dialog = self.dialog([PostRecord(str(1000+i)) for i in range(205)])
+        self.catalog.upsert_collection_posts("other", [PostRecord("999")])
+        first = dialog.current_records[0]
+        dialog.selectors[first.post_id].setCurrentIndex(dialog.selectors[first.post_id].findData("text"))
+        dialog.next_page()
+        notifications = []
+        dialog.inbox_reset.connect(lambda: notifications.append(True))
+        with patch.object(InboxResetDialog, "exec", return_value=QDialog.Accepted):
+            dialog._reset_inbox()
+        self.assertEqual(self.catalog.pending_collection_post_count("c"), 0)
+        self.assertEqual(self.catalog.pending_collection_post_count("other"), 1)
+        self.assertEqual(dialog.choices(), {})
+        self.assertEqual(dialog.records_for_choices(), [])
+        self.assertEqual(dialog.page_index, 0)
+        self.assertFalse(dialog.apply_btn.isEnabled())
+        self.assertFalse(dialog.bulk.isEnabled())
+        self.assertTrue(dialog.reset_btn.isEnabled())  # retained history can still be reset
+        self.assertEqual(notifications, [True])
+
+    def test_history_reset_removes_known_posts_and_busy_guard_is_checked_again(self):
+        dialog = self.dialog([PostRecord("123")], reset_allowed=lambda: True)
+        with patch.object(InboxResetDialog, "exec", return_value=QDialog.Accepted), \
+                patch.object(InboxResetDialog, "mode", return_value="history"):
+            dialog._reset_inbox()
+        self.assertEqual(self.catalog.collection_post_ids("c"), set())
+        self.assertFalse(dialog.reset_btn.isEnabled())
+        self.catalog.upsert_collection_posts("c", [PostRecord("456")])
+        dialog._load_page()
+        calls = iter((True, False))
+        dialog.reset_allowed = lambda: next(calls)
+        with patch.object(InboxResetDialog, "exec", return_value=QDialog.Accepted), \
+                patch("app.QMessageBox.information"):
+            dialog._reset_inbox()
+        self.assertEqual(self.catalog.collection_post_ids("c"), {"456"})
+
+    def test_failed_reset_keeps_draft_choices_and_pending_posts(self):
+        def fail(_mode):
+            raise OSError("simulated storage failure")
+        dialog = self.dialog([PostRecord("123")], reset_handler=fail)
+        selector = dialog.selectors["123"]
+        selector.setCurrentIndex(selector.findData("text"))
+        with patch.object(InboxResetDialog, "exec", return_value=QDialog.Accepted), patch("app.QMessageBox.warning"):
+            dialog._reset_inbox()
+        self.assertEqual(dialog.choices()["123"], "text")
+        self.assertEqual(self.catalog.pending_collection_post_count("c"), 1)

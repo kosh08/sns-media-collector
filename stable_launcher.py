@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from install_layout import latest_executable
+from windows_taskbar import APP_ID, set_process_identity
 
 
 def application_root() -> Path:
@@ -23,12 +24,14 @@ def show_error(message: str) -> None:
 
 
 def main() -> int:
+    set_process_identity()
     if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
         target = latest_executable(application_root() / "versions")
         Path(sys.argv[2]).write_text(json.dumps({
             "success": True,
             "frozen": bool(getattr(sys, "frozen", False)),
             "target": str(target) if target else None,
+            "app_id": APP_ID,
         }), encoding="utf-8")
         return 0
 

@@ -1345,4 +1345,64 @@ class Regressions(unittest.TestCase):
         self.assertEqual(len(choices), 101)
         self.assertEqual({record.post_id for record in chosen_records}, set(choices))
         dialog.close()
+    def test_history_reset_restarts_scan_and_preserves_destinations_shared_boundaries_and_other_collection(self):
+        collection = self.w.collection_store.upsert(CollectionProfile(
+            '取り込み直し', 'acct', 'x', source='likes', review_mode='inbox',
+            likes_scan_next=1501, likes_scan_complete=True,
+            destination=str(self.root / 'images'), text_destination=str(self.root / 'text'),
+        ))
+        other = self.w.collection_store.upsert(CollectionProfile('他設定', 'other', 'x', source='likes', likes_scan_next=501))
+        self.w.refresh_collections(collection.collection_id)
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [PostRecord(NEW.post_id)])
+        self.w.catalog.upsert_collection_posts(other.collection_id, [PostRecord('999')])
+        destinations = self.w.dest_edit.text(), self.w.text_images_dest_edit.text(), self.w.text_dest_edit.text()
+        anchors = self.anchors()
+        self.assertEqual(self.w.reset_collection_inbox(collection, 'history'), 1)
+        reset = self.w.collection_store.get(collection.collection_id)
+        self.assertEqual(reset.likes_scan_next, 1)
+        self.assertFalse(reset.likes_scan_complete)
+        self.assertEqual(self.w.collection_store.get(other.collection_id).likes_scan_next, 501)
+        self.assertEqual(self.anchors(), anchors)
+        self.assertEqual(self.w.catalog.collection_post_ids(other.collection_id), {'999'})
+        self.assertEqual((self.w.dest_edit.text(), self.w.text_images_dest_edit.text(), self.w.text_dest_edit.text()), destinations)
+        self.assertEqual(self.w.catalog.collection_post_count(collection.collection_id), 0)
+
+    def test_history_reset_database_failure_restores_scan_configuration(self):
+        from collection_profiles import CollectionStore
+        collection = self.w.collection_store.upsert(CollectionProfile('失敗確認', 'acct', 'x', source='likes', likes_scan_next=1501))
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [PostRecord('123')])
+        self.w.catalog.conn.execute("CREATE TRIGGER deny_reset BEFORE DELETE ON collection_posts BEGIN SELECT RAISE(ABORT,'test'); END")
+        with self.assertRaises(Exception):
+            self.w.reset_collection_inbox(collection, 'history')
+        self.assertEqual(self.w.collection_store.get(collection.collection_id).likes_scan_next, 1501)
+        self.assertEqual(CollectionStore(self.w.collection_store.path).get(collection.collection_id).likes_scan_next, 1501)
+        self.assertEqual(self.w.catalog.collection_post_ids(collection.collection_id), {'123'})
+
+    def test_history_reset_configuration_failure_does_not_delete_posts(self):
+        collection = self.w.collection_store.upsert(CollectionProfile('設定書込失敗', 'acct', 'x', source='likes', likes_scan_next=1501))
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [PostRecord('123')])
+        with patch.object(self.w.collection_store, 'save', side_effect=OSError('read only')):
+            with self.assertRaises(OSError):
+                self.w.reset_collection_inbox(collection, 'history')
+        self.assertEqual(self.w.collection_store.get(collection.collection_id).likes_scan_next, 1501)
+        self.assertEqual(self.w.catalog.collection_post_ids(collection.collection_id), {'123'})
+
+    def test_inbox_reset_is_available_when_empty_but_history_exists_and_blocks_only_related_jobs(self):
+        collection = self.w.collection_store.upsert(CollectionProfile('空の確認箱', 'acct', 'x', source='likes'))
+        self.w.catalog.upsert_collection_posts(collection.collection_id, [PostRecord('123')])
+        self.w.catalog.set_collection_post_choice(collection.collection_id, '123', 'skip')
+        self.w.refresh_collections(collection.collection_id)
+        self.assertEqual(self.w.catalog.pending_collection_post_count(), 0)
+        self.assertTrue(self.w.inbox_btn.isEnabled())
+        job = DownloadJob('waiting', [sys.executable, '-c', 'pass'])
+        job.smc_context = {'collection_id': 'different'}
+        self.w.jobs.append(job)
+        self.assertFalse(self.w.collection_has_unfinished_jobs(collection.collection_id))
+        job.smc_context['collection_id'] = collection.collection_id
+        with self.assertRaises(ValueError):
+            self.w.reset_collection_inbox(collection, 'history')
+        self.assertEqual(self.w.catalog.collection_post_ids(collection.collection_id), {'123'})
+        job.completed = True
+        self.assertFalse(self.w.collection_has_unfinished_jobs(collection.collection_id))
+
 if __name__ == '__main__': unittest.main(verbosity=2)

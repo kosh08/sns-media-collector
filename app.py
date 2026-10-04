@@ -29,6 +29,7 @@ from core import (
 from collection_profiles import CollectionProfile, CollectionStore
 from recovery import find_recovery_candidate, has_user_profile_data, restore_candidate
 from inbox_previews import PreviewImageLoader, PreviewTile, LegacyPreviewResolver
+import windows_taskbar
 
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QInputDialog,
@@ -46,7 +47,7 @@ from auth_store import (
 )
 
 APP_NAME = "SNS Media Collector"
-APP_VERSION = "0.4.14"
+APP_VERSION = "0.4.15"
 LIKES_HISTORY_BATCH_SIZE = 500
 LIKES_HISTORY_OVERLAP = 25
 REVIEW_INBOX_PAGE_SIZE = 100
@@ -1459,13 +1460,63 @@ class NoWheelComboBox(QComboBox):
             parent = parent.parentWidget()
 
 
+class InboxResetDialog(QDialog):
+    def __init__(self, collection, pending_count, history_count, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("確認箱をリセット")
+        self.resize(580, 340)
+        layout = QVBoxLayout(self)
+        scope = QLabel(f"対象：{collection.name}\n未振り分け {pending_count:,}件 / 取り込み履歴 {history_count:,}件")
+        scope.setTextFormat(Qt.PlainText)
+        scope.setWordWrap(True)
+        layout.addWidget(scope)
+        self.empty_only = QRadioButton("確認箱だけ空にする")
+        self.empty_only.setChecked(True)
+        layout.addWidget(self.empty_only)
+        empty_note = QLabel("全ページの未振り分け投稿を一覧から外します。\n取り込み履歴は残し、同じ投稿を次の取得で再投入しません。")
+        empty_note.setWordWrap(True)
+        layout.addWidget(empty_note)
+        self.reset_history = QRadioButton("取り込み履歴もリセットする")
+        layout.addWidget(self.reset_history)
+        history_text = "振り分け済みを含め、この取得設定の投稿履歴を消します。\n"
+        if collection.platform == "x" and collection.source == "likes":
+            history_text += "いいねの一覧確認も先頭へ戻します。取り込み直す場合は、リセット後に「すべて確認」を使ってください。"
+        else:
+            history_text += "次回の取得で、探索範囲内の投稿を取り込み直せます。"
+        history_note = QLabel(history_text)
+        history_note.setWordWrap(True)
+        layout.addWidget(history_note)
+        preserve = QLabel("保存済みの本文・画像・動画、重複保存を防ぐ記録、差分取得の基準、他の取得設定は残します。")
+        preserve.setWordWrap(True)
+        layout.addWidget(preserve)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("キャンセル")
+        cancel.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        reset = QPushButton("リセットする")
+        reset.setAutoDefault(False)
+        reset.clicked.connect(self.accept)
+        buttons.addWidget(reset)
+        layout.addLayout(buttons)
+
+    def mode(self):
+        return "history" if self.reset_history.isChecked() else "empty"
+
+
 class ReviewInboxDialog(QDialog):
     """Render a bounded page of pending posts instead of the entire inbox."""
 
-    def __init__(self, collection: CollectionProfile, catalog: Catalog, parent=None, preview_command=None):
+    inbox_reset = Signal()
+
+    def __init__(self, collection: CollectionProfile, catalog: Catalog, parent=None,
+                 preview_command=None, reset_handler=None, reset_allowed=None):
         super().__init__(parent)
         self.collection = collection
         self.catalog = catalog
+        self.reset_handler = reset_handler or (lambda mode: catalog.reset_collection_inbox(collection.collection_id, mode))
+        self.reset_allowed = reset_allowed or (lambda: True)
         self.page_index = 0
         self.current_records: list[PostRecord] = []
         self.selectors: dict[str, QComboBox] = {}
@@ -1524,8 +1575,12 @@ class ReviewInboxDialog(QDialog):
         layout.addLayout(navigation)
 
         actions = QHBoxLayout()
+        self.reset_btn = QPushButton("確認箱をリセット…")
+        self.reset_btn.clicked.connect(self._reset_inbox)
+        actions.addWidget(self.reset_btn)
         cancel = QPushButton("閉じる")
         apply_btn = QPushButton("表示中＋変更済みを振り分け")
+        self.apply_btn = apply_btn
         apply_btn.setObjectName("primary")
         cancel.clicked.connect(self.reject)
         apply_btn.clicked.connect(self.accept)
@@ -1534,6 +1589,34 @@ class ReviewInboxDialog(QDialog):
         actions.addWidget(apply_btn)
         layout.addLayout(actions)
         self._load_page()
+
+    def _reset_inbox(self):
+        if not self.reset_allowed():
+            QMessageBox.information(self, "確認箱のリセット", "この取得設定の取得・保存タスクが実行中または待機中です。\nタスクが完了するか停止してからリセットしてください。")
+            return
+        confirm = InboxResetDialog(
+            self.collection, self.catalog.pending_collection_post_count(self.collection.collection_id),
+            self.catalog.collection_post_count(self.collection.collection_id), self,
+        )
+        accepted = confirm.exec() == QDialog.Accepted
+        mode = confirm.mode()
+        confirm.deleteLater()
+        if not accepted:
+            return
+        if not self.reset_allowed():
+            QMessageBox.information(self, "確認箱のリセット", "取得・保存タスクが開始されたため、リセットを中止しました。")
+            return
+        try:
+            self.reset_handler(mode)
+        except Exception as exc:
+            QMessageBox.warning(self, "リセットできませんでした", str(exc))
+            return
+        self._draft_choices.clear()
+        self._draft_records.clear()
+        self._dirty_post_ids.clear()
+        self.page_index = 0
+        self._load_page()
+        self.inbox_reset.emit()
 
     def choices(self) -> dict[str, str]:
         self._remember_current_page()
@@ -1644,6 +1727,10 @@ class ReviewInboxDialog(QDialog):
             )
             rows.addWidget(frame)
         rows.addStretch()
+        if not self.current_records:
+            empty = QLabel("確認箱は空です。")
+            empty.setAlignment(Qt.AlignCenter)
+            rows.insertWidget(0, empty)
         previous_holder = self.scroll.takeWidget()
         self.scroll.setWidget(holder)
         if previous_holder is not None:
@@ -1657,6 +1744,9 @@ class ReviewInboxDialog(QDialog):
         self.previous_btn.setEnabled(self.page_index > 0)
         self.next_btn.setEnabled(end < total)
         self.scroll.verticalScrollBar().setValue(0)
+        self.apply_btn.setEnabled(bool(self.current_records))
+        self.bulk.setEnabled(bool(self.current_records))
+        self.reset_btn.setEnabled(self.catalog.collection_post_count(self.collection.collection_id) > 0)
         self.preview_timer.start()
 
     def _fill_previews(self, record):
@@ -2694,6 +2784,8 @@ class MainWindow(QMainWindow):
         if collection.destination:
             self.target_status.setText("✓ この取得設定に保存先を登録済みです。")
         self.refresh_editor_heading()
+
+        self.refresh_inbox_count()
 
     def collection_from_current(self, *, name: str, collection_id: str = "") -> CollectionProfile:
         idx = self.account_combo.currentData()
@@ -3796,20 +3888,27 @@ class MainWindow(QMainWindow):
         if hasattr(self, "inbox_btn"):
             count = self.catalog.pending_collection_post_count()
             self.inbox_btn.setText(f"確認箱  {count:,}件")
-            self.inbox_btn.setEnabled(count > 0)
+            collection = self.current_collection()
+            has_history = bool(collection and self.catalog.collection_post_count(collection.collection_id))
+            self.inbox_btn.setEnabled(count > 0 or has_history)
 
     def open_review_inbox(self):
         collection = self.current_collection()
         if not collection:
             return
-        if not self.catalog.pending_collection_post_count(collection.collection_id):
-            QMessageBox.information(self, "確認箱", "この取得設定に未振り分けの投稿はありません。"); return
+        if not self.catalog.collection_post_count(collection.collection_id):
+            QMessageBox.information(self, "確認箱", "この取得設定の確認箱・取り込み履歴はまだありません。"); return
         account = next((a for a in self.accounts if a.profile_id == collection.account_id and a.platform == "x"), None)
         command = None
         if account:
             engine, mode, value = self.engine_command(), account.auth_mode, account.auth_value
             command = lambda record: build_x_post_preview_command(engine, record, auth_mode=mode, auth_value=value)
-        dialog = ReviewInboxDialog(collection, self.catalog, self, preview_command=command)
+        dialog = ReviewInboxDialog(
+            collection, self.catalog, self, preview_command=command,
+            reset_handler=lambda mode: self.reset_collection_inbox(collection, mode),
+            reset_allowed=lambda: not self.collection_has_unfinished_jobs(collection.collection_id),
+        )
+        dialog.inbox_reset.connect(self.refresh_inbox_count)
         if dialog.exec() == QDialog.Accepted:
             try:
                 self.queue_collection_posts(collection, dialog.records_for_choices(), dialog.choices())
@@ -3817,6 +3916,61 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.warning(self, "振り分け", str(exc))
         dialog.deleteLater()
+
+    def collection_has_unfinished_jobs(self, collection_id):
+        return any(
+            getattr(job, "smc_context", {}).get("collection_id") == collection_id
+            and not job.completed
+            and (not job.cancelled or job.process.state() != QProcess.NotRunning
+                 or (job.snapshot_worker is not None and job.snapshot_worker.isRunning()))
+            for job in self.jobs
+        )
+
+    def reset_collection_inbox(self, collection, mode):
+        if self.collection_has_unfinished_jobs(collection.collection_id):
+            raise ValueError("この取得設定の取得・保存タスクが終わるか停止してからリセットしてください。")
+        if mode not in {"empty", "history"}:
+            raise ValueError("不正なリセット方法です。")
+        if mode == "empty":
+            count = self.catalog.reset_collection_inbox(collection.collection_id, mode)
+        else:
+            original_items = list(self.collection_store.items)
+            saved = False
+            try:
+                self.collection_store.upsert(replace(collection, likes_scan_next=1, likes_scan_complete=False))
+                saved = True
+                count = self.catalog.reset_collection_inbox(collection.collection_id, mode)
+            except Exception:
+                self.collection_store.items = original_items
+                if saved:
+                    self.collection_store.save()
+                raise
+            self.range_status.setText(self.range_status_text(self.current_target_profile(create=False)))
+        self.refresh_inbox_count()
+        self.footer_status.setText(
+            f"確認箱をリセットしました（{count:,}件）" + (" · いいねの取り込み直しは「すべて確認」から" if mode == "history" and collection.source == "likes" else "")
+        )
+        return count
+
+    def configure_taskbar_identity(self):
+        self._taskbar_hwnd = 0
+        if sys.platform == "win32" and getattr(sys, "frozen", False) and QApplication.platformName().lower() == "windows":
+            try:
+                hwnd = int(self.winId())
+                windows_taskbar.configure_window(hwnd, Path(sys.executable))
+                self._taskbar_hwnd = hwnd
+                QApplication.instance().aboutToQuit.connect(self.clear_taskbar_identity)
+            except OSError as exc:
+                self.log.append(f"[TASKBAR] {exc}")
+
+    def clear_taskbar_identity(self):
+        hwnd = getattr(self, "_taskbar_hwnd", 0)
+        self._taskbar_hwnd = 0
+        if hwnd:
+            try:
+                windows_taskbar.clear_window(hwnd)
+            except OSError:
+                pass
 
     def start_next_job(self):
         if self._closing:
@@ -4454,6 +4608,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def closeEvent(self, event):
+        self.clear_taskbar_identity()
         self._closing = True
         if hasattr(self, "_session_timer"):
             self._session_timer.stop()
@@ -4473,12 +4628,16 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if getattr(sys, "frozen", False):
+        windows_taskbar.set_process_identity()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyleSheet(DARK_QSS)
     font = QFont("Segoe UI", 10)
     app.setFont(font)
-    w = MainWindow(); w.show()
+    w = MainWindow()
+    w.configure_taskbar_identity()
+    w.show()
     sys.exit(app.exec())
 
 

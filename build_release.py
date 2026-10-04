@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from windows_taskbar import APP_ID, shortcut_metadata
 
 ROOT = Path(__file__).resolve().parent
 
@@ -47,6 +48,8 @@ def launcher_self_test(executable: Path, report: Path, require_target: bool = Fa
     data = json.loads(report.read_text(encoding='utf-8'))
     if data.get('success') is not True or data.get('frozen') is not True:
         raise RuntimeError(f'Stable launcher self-test failed: {report}')
+    if data.get('app_id') != APP_ID:
+        raise RuntimeError('Stable launcher taskbar identity does not match the application')
     if require_target and not data.get('target'):
         raise RuntimeError(f'Stable launcher did not resolve an installed app: {report}')
 
@@ -112,6 +115,20 @@ def verify_installer(compiler: Path, bundle: Path, launcher: Path, output: Path,
                          f'/DIR={install}', '/TASKS=', f'/LOG={output / (label + ".log")}'])
                 if marker.read_bytes() != original:
                     raise RuntimeError('Installer modified user data')
+                shortcut = Path(os.environ['APPDATA']) / 'Microsoft/Windows/Start Menu/Programs/SNS Media Collector/SNS Media Collector.lnk'
+                installed_shortcut = shortcut_metadata(shortcut)
+                if installed_shortcut['id'] != APP_ID or not Path(installed_shortcut['target']).samefile(install / 'SNSMediaCollector.exe'):
+                    raise RuntimeError('Installed shortcut is not associated with the stable taskbar launcher')
+                # Preserve a copy as a pinned shortcut would be preserved. Never
+                # alter the runner's or developer's real taskbar configuration.
+                pin = temp / 'preserved-pin.lnk'
+                if label == 'oldest':
+                    shutil.copy2(shortcut, pin)
+                    original_pin = pin.read_bytes()
+                pinned_shortcut = shortcut_metadata(pin)
+                if (pin.read_bytes() != original_pin or pinned_shortcut['id'] != APP_ID
+                        or not Path(pinned_shortcut['target']).samefile(install / 'SNSMediaCollector.exe')):
+                    raise RuntimeError('Taskbar shortcut changed or stopped resolving across upgrade')
             self_test(install / 'versions' / version / 'SNSMediaCollector.exe', output / 'installed-self-test.json')
             launcher_self_test(
                 install / 'SNSMediaCollector.exe', output / 'launcher-self-test.json',
@@ -124,6 +141,8 @@ def verify_installer(compiler: Path, bundle: Path, launcher: Path, output: Path,
             retained = [path.name for path in (install / 'versions').iterdir() if path.is_dir()]
             if set(retained) != {previous_version, version}:
                 raise RuntimeError(f'Unexpected installed versions remain: {retained}')
+            if not (install / 'SNSMediaCollector.exe').is_file():
+                raise RuntimeError('Stable taskbar relaunch target was removed during cleanup')
         finally:
             try:
                 if uninstaller.exists():
@@ -185,6 +204,7 @@ def main() -> int:
             success=True, version=version, setup=setup.name, sha256=digest,
             checks=['frozen app', 'preview-enabled gallery-dl', 'updater helper', 'stable launcher', 'install', 'two-step upgrade',
                     'old-version cleanup', 'rollback retention', 'reinstall', 'installed app',
+                    'stable taskbar shortcut across upgrades', 'native taskbar properties',
                     'uninstall preserves user data']), indent=2), encoding='utf-8')
     return 0
 

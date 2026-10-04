@@ -25,6 +25,9 @@ def run(output: str) -> int:
             from PySide6.QtGui import QPixmap
             from app import MainWindow, APP_VERSION
             from core import LikeSeenRecord, Catalog
+            from windows_taskbar import native_self_test
+            report['taskbar'] = native_self_test(Path(sys.executable))
+            report['checks'].append('native stable taskbar identity, relaunch and property cleanup')
             application = QApplication.instance() or QApplication([])
             window = MainWindow()
             try:

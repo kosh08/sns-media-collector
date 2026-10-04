@@ -1275,6 +1275,27 @@ class Catalog:
             row = self.conn.execute("SELECT COUNT(*) FROM collection_posts WHERE state='pending'").fetchone()
         return int(row[0] or 0)
 
+    def collection_post_count(self, collection_id: str) -> int:
+        return int(self.conn.execute(
+            "SELECT COUNT(*) FROM collection_posts WHERE collection_id=?", (collection_id,),
+        ).fetchone()[0])
+
+    def reset_collection_inbox(self, collection_id: str, mode: str) -> int:
+        """Reset only post-review metadata; never anchors, archives or saved files."""
+        if not str(collection_id or "").strip() or mode not in {"empty", "history"}:
+            raise ValueError("Invalid inbox reset scope or mode")
+        with self.conn:
+            if mode == "history":
+                cursor = self.conn.execute("DELETE FROM collection_posts WHERE collection_id=?", (collection_id,))
+            else:
+                # Keep IDs so discarded posts do not reappear on the next scan.
+                cursor = self.conn.execute(
+                    """UPDATE collection_posts SET state='processed',choice='skip',updated_at=?
+                       WHERE collection_id=? AND state='pending'""",
+                    (iso_utc(utc_now()), collection_id),
+                )
+        return max(0, int(cursor.rowcount or 0))
+
     def recover_interrupted_collection_posts(self) -> int:
         """Recover interrupted preparation and non-persistent download queues."""
         with self.conn:
