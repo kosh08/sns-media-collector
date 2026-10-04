@@ -1,5 +1,4 @@
 from pathlib import Path
-import base64
 import ctypes
 import subprocess
 import sys
@@ -9,10 +8,43 @@ import unittest
 from windows_taskbar import APP_ID, relaunch_executable, window_values
 
 
+def create_unicode_shortcut(link, target):
+    # IShellLinkW preserves Japanese paths on runners with an English locale.
+    # https://learn.microsoft.com/en-us/windows/win32/shell/links
+    from windows_taskbar import GUID, _check, _method
+    ole = ctypes.WinDLL("ole32")
+    ole.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    ole.CoInitializeEx.restype = ctypes.c_int32
+    initialized = ole.CoInitializeEx(None, 2)
+    if initialized < 0 and initialized != -2147417850:
+        _check(initialized)
+    shell_link = ctypes.c_void_p()
+    persist = ctypes.c_void_p()
+    try:
+        create = ole.CoCreateInstance
+        create.argtypes = [ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_uint32,
+                           ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+        create.restype = ctypes.c_int32
+        clsid = GUID.parse("00021401-0000-0000-c000-000000000046")
+        iid = GUID.parse("000214f9-0000-0000-c000-000000000046")
+        _check(create(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(shell_link)))
+        _check(_method(shell_link, 20, ctypes.c_int32, ctypes.c_wchar_p)(shell_link, str(target)))
+        iid_persist = GUID.parse("0000010b-0000-0000-c000-000000000046")
+        query = _method(shell_link, 0, ctypes.c_int32, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p))
+        _check(query(shell_link, ctypes.byref(iid_persist), ctypes.byref(persist)))
+        _check(_method(persist, 6, ctypes.c_int32, ctypes.c_wchar_p, ctypes.c_int)(persist, str(link), 1))
+    finally:
+        for interface in (persist, shell_link):
+            if interface:
+                _method(interface, 2, ctypes.c_uint32)(interface)
+        if initialized >= 0:
+            ole.CoUninitialize()
+
+
 class TaskbarTests(unittest.TestCase):
     def test_relaunch_target_is_stable_across_updates_and_cleanup(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td) / "installed 日本語"
+            root = Path(td).resolve() / "installed 日本語"
             root.mkdir()
             stable = root / "SNSMediaCollector.exe"
             stable.write_bytes(b"launcher")
@@ -56,12 +88,7 @@ class TaskbarTests(unittest.TestCase):
             stable = root / "SNSMediaCollector.exe"
             stable.write_bytes(b"stable launcher")
             link = root / "sample-pin.lnk"
-            literal = lambda path: "'" + str(path).replace("'", "''") + "'"
-            script = "$s=(New-Object -ComObject WScript.Shell).CreateShortcut(" + literal(link) + ");$s.TargetPath=" + literal(stable) + ";$s.Save()"
-            encoded = base64.b64encode(script.encode("utf-16-le")).decode()
-            result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                                    capture_output=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
-            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+            create_unicode_shortcut(link, stable)
             with _property_store(path=link, flags=2) as store:  # GPS_READWRITE, temporary shortcut only
                 _write(store, 5, APP_ID)
                 self.assertEqual(_method(store, 7, ctypes.c_int32)(store), 0)
