@@ -96,6 +96,36 @@ class InboxPreviewTests(unittest.TestCase):
             tile = dialog.preview_rows[first.post_id][2][0]
             self.assertIn("失敗", tile.text())
 
+    def test_card_keeps_small_display_image_and_shared_cache_has_byte_limit(self):
+        dialog = self.dialog([PostRecord("123", media_count=1, previews=(PREVIEW,))])
+        pixmap = QPixmap(1200, 1000)
+        pixmap.fill(Qt.blue)
+        dialog.preview_loader.ready.emit(PREVIEW.url, pixmap)
+        self.assertLessEqual(dialog.preview_rows["123"][2][0].pixmap.height(), 112)
+        loader = dialog.preview_loader
+        loader.MAX_IMAGE_CACHE_BYTES = 2 * 1024 * 1024
+        image = QImage(1000, 1000, QImage.Format_RGB32)
+        image.fill(Qt.red)
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        image.save(buffer, "PNG")
+        replies = []
+        def get(_request):
+            reply = FakeReply()
+            reply.data = bytes(buffer.data())
+            replies.append(reply)
+            return reply
+        with patch.object(loader.manager, "get", get):
+            for i in range(10):
+                loader.request(f"https://pbs.twimg.com/media/cache{i}.jpg")
+            index = 0
+            while loader.active:
+                replies[index].finished.emit()
+                index += 1
+        self.assertLess(sum(p.width() * p.height() * p.depth() // 8 for p in loader.images.values()),
+                        loader.MAX_IMAGE_CACHE_BYTES)
+        self.assertLess(len(loader.images), 10)
+
     def test_metadata_completion_preserves_body_and_draft_and_only_updates_previews(self):
         record = PostRecord("123", author_name="name", content="keep body", media_count=1)
         dialog = self.dialog([record], preview_command=lambda _r: [sys.executable, "-c", "pass"])

@@ -16,6 +16,7 @@ class PreviewImageLoader(QObject):
     ready = Signal(str, QPixmap)
     failed = Signal(str)
     MAX_BYTES = 2 * 1024 * 1024
+    MAX_IMAGE_CACHE_BYTES = 32 * 1024 * 1024
 
     def __init__(self, cache_dir: Path, parent=None):
         super().__init__(parent)
@@ -29,7 +30,7 @@ class PreviewImageLoader(QObject):
         self.active = {}
 
     @staticmethod
-    def decode(data):
+    def decode(data, max_size=QSize(1200, 1000)):
         buffer = QBuffer()
         buffer.setData(QByteArray(data))
         buffer.open(QIODevice.ReadOnly)
@@ -38,7 +39,7 @@ class PreviewImageLoader(QObject):
         size = reader.size()
         if not size.isValid() or size.width() * size.height() > 20_000_000:
             return QPixmap()
-        reader.setScaledSize(size.scaled(QSize(1200, 1000), Qt.KeepAspectRatio))
+        reader.setScaledSize(size.scaled(max_size, Qt.KeepAspectRatio))
         return QPixmap.fromImage(reader.read())
 
     def request(self, url, size="small"):
@@ -84,14 +85,17 @@ class PreviewImageLoader(QObject):
             return
         reply, data = state
         status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
-        pixmap = (self.decode(data) if reply.error() == QNetworkReply.NoError
+        max_size = QSize(1200, 1000) if "name=medium" in key else QSize(640, 480)
+        pixmap = (self.decode(data, max_size) if reply.error() == QNetworkReply.NoError
                   and status == 200 and len(data) <= self.MAX_BYTES else QPixmap())
         reply.deleteLater()
         if pixmap.isNull():
             self.failed.emit(key)
         else:
             self.images[key] = pixmap
-            while len(self.images) > 48:
+            while (len(self.images) > 48 or
+                   sum(p.width() * p.height() * max(1, p.depth() // 8) for p in self.images.values())
+                   > self.MAX_IMAGE_CACHE_BYTES):
                 self.images.popitem(last=False)
             self.ready.emit(key, pixmap)
         self._pump()
@@ -143,7 +147,7 @@ class PreviewTile(QPushButton):
     def _ready(self, key, pixmap):
         if key == self.preview.url:
             self.loaded = True
-            self.pixmap = pixmap
+            self.pixmap = pixmap.scaled(QSize(480, 112), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self._scale_image()
             self.setText(self.badge + " · 拡大")
 
